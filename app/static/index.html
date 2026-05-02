@@ -19,6 +19,9 @@
       <div class="status-line"><span>Inventory rows</span><strong id="inventory-count">0</strong></div>
       <div class="status-line"><span>Photos</span><strong id="image-count">0</strong></div>
       <div class="status-line"><span>Last import</span><strong id="last-import">Never</strong></div>
+      <div class="status-actions">
+        <button id="sync-btn" class="primary" type="button">Sync BSData</button>
+      </div>
     </div>
   </header>
 
@@ -29,17 +32,9 @@
       <button type="button" class="tab" data-game="age_of_sigmar_4e">AoS</button>
     </nav>
 
-    <section class="panel sync-panel">
-      <div>
-        <h2>1. Sync BSData</h2>
-        <p id="sync-copy">Import the Warhammer 40,000 10th edition catalogues. Later, click this again to pull updates.</p>
-      </div>
-      <button id="sync-btn" class="primary">Sync BSData</button>
-    </section>
-
     <section class="grid two-col">
       <div class="panel">
-        <h2>2. Add from catalogue</h2>
+        <h2>1. Add from catalogue</h2>
         <div class="form-row">
           <label>
             Search catalogue
@@ -81,7 +76,7 @@
     <section class="panel inventory-panel">
       <div class="section-heading">
         <div>
-          <h2>3. Inventory</h2>
+          <h2>2. Inventory</h2>
           <p>Update counts directly in the table. BSData-linked items show weapon options with quantity boxes; use the model number field for numbers written on bases, and upload built or painted photos per row.</p>
         </div>
         <a id="export-link" class="button-link" href="/api/export.csv?game_system=wh40k_10e">Export CSV</a>

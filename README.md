@@ -60,7 +60,7 @@ Open the app at:
 http://127.0.0.1:8000
 ```
 
-Then choose the **40k**, **Kill Team**, or **AoS** tab and click the sync button for that tab.
+Then choose the **40k**, **Kill Team**, or **AoS** tab and click **Sync BSData** under **Last import**.
 
 To run the local dev server with login enabled:
 

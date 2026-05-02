@@ -77,6 +77,15 @@ h2 { font-size: 1.2rem; margin-bottom: 8px; }
 .status-line span { color: var(--muted); }
 .status-line strong { text-align: right; }
 
+.status-actions {
+  display: grid;
+  padding-top: 14px;
+}
+
+.status-actions button {
+  width: 100%;
+}
+
 .game-tabs {
   display: flex;
   gap: 10px;
@@ -101,7 +110,7 @@ h2 { font-size: 1.2rem; margin-bottom: 8px; }
   box-shadow: 0 8px 24px rgba(242, 193, 78, 0.18);
 }
 
-.sync-panel, .section-heading {
+.section-heading {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -491,10 +500,10 @@ td textarea { min-width: 220px; }
 .toast.ok { background: var(--ok); color: #06150c; }
 
 @media (max-width: 860px) {
-  .hero, .grid.two-col, .sync-panel, .section-heading { grid-template-columns: 1fr; display: grid; }
+  .hero, .grid.two-col, .section-heading { grid-template-columns: 1fr; display: grid; }
   .hero { padding-top: 24px; }
   .form-row, .form-row.three, .form-row.two { grid-template-columns: 1fr; }
-  .sync-panel, .section-heading { align-items: stretch; }
+  .section-heading { align-items: stretch; }
   .game-tabs { width: 100%; }
   .game-tabs .tab { flex: 1; }
   .summary-header { display: grid; align-items: start; }

@@ -157,8 +157,9 @@ function updateGameCopy() {
     wh40k_10e: "Track Warhammer 40,000 units and models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.",
   };
   el("game-subtitle").textContent = subtitles[state.currentGame] || `Track ${system.label} models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.`;
-  el("sync-copy").textContent = `Import the ${system.label} BSData catalogue. Later, click this again to pull updates.`;
-  el("sync-btn").textContent = `Sync ${system.short_label || system.label} BSData`;
+  el("sync-btn").textContent = "Sync BSData";
+  el("sync-btn").title = `Sync ${system.label} BSData`;
+  el("sync-btn").setAttribute("aria-label", `Sync ${system.label} BSData`);
   const placeholders = {
     kill_team: "Legionary, Kommandos, Angels of Death, Plague Marine...",
     age_of_sigmar_4e: "Liberators, Clanrats, Blood Warriors, Treelord...",
