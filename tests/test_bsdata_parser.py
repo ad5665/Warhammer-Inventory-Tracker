@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.bsdata import parse_catalogue_file
+from app.bsdata import _linked_entry_points, parse_catalogue_file
 
 
 def test_parse_catalogue_file_reads_unit_entries(tmp_path: Path):
@@ -108,6 +108,75 @@ def test_parse_catalogue_file_prefixes_kill_team_ids(tmp_path: Path):
     assert units[0].bs_id == "kill_team:operative-1"
     assert units[0].name == "Aspiring Champion"
     assert units[0].stats["APL"] == "3"
+
+
+def test_parse_catalogue_file_reads_age_of_sigmar_units(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Stormcast Eternals - Library">
+      <sharedSelectionEntries>
+        <selectionEntry id="liberators-1" name="Liberators" type="unit">
+          <costs><cost name="pts" typeId="points" value="110" /></costs>
+          <categoryLinks>
+            <categoryLink name="Infantry" />
+            <categoryLink name="Warrior Chamber" />
+          </categoryLinks>
+          <profiles>
+            <profile id="unit-profile" name="Liberators" typeName="Unit">
+              <characteristics>
+                <characteristic name="Move">5&quot;</characteristic>
+                <characteristic name="Health">2</characteristic>
+                <characteristic name="Save">3+</characteristic>
+                <characteristic name="Control">1</characteristic>
+              </characteristics>
+            </profile>
+            <profile id="weapon-profile" name="Warhammer" typeName="Melee Weapon">
+              <characteristics>
+                <characteristic name="Atk">2</characteristic>
+                <characteristic name="Hit">3+</characteristic>
+                <characteristic name="Wnd">3+</characteristic>
+                <characteristic name="Rnd">1</characteristic>
+                <characteristic name="Dmg">1</characteristic>
+              </characteristics>
+            </profile>
+          </profiles>
+        </selectionEntry>
+      </sharedSelectionEntries>
+    </catalogue>
+    '''
+    path = tmp_path / "Stormcast Eternals - Library.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    units = parse_catalogue_file(path, "age_of_sigmar_4e")
+
+    assert len(units) == 1
+    assert units[0].game_system == "age_of_sigmar_4e"
+    assert units[0].bs_id == "age_of_sigmar_4e:liberators-1"
+    assert units[0].name == "Liberators"
+    assert units[0].faction == "Stormcast Eternals"
+    assert units[0].points == 110
+    assert units[0].stats["Health"] == "2"
+    assert units[0].stats["Control"] == "1"
+    assert units[0].wargear_options[0].name == "Warhammer"
+    assert units[0].wargear_options[0].kind == "Melee"
+    assert units[0].wargear_options[0].stats["Hit"] == "3+"
+
+
+def test_linked_entry_points_reads_age_of_sigmar_costs(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Stormcast Eternals">
+      <entryLinks>
+        <entryLink id="link-liberators" name="Liberators" type="selectionEntry" targetId="liberators-1">
+          <costs><cost name="pts" typeId="points" value="90" /></costs>
+        </entryLink>
+      </entryLinks>
+    </catalogue>
+    '''
+    path = tmp_path / "Stormcast Eternals.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    points = _linked_entry_points([path], "age_of_sigmar_4e")
+
+    assert points["age_of_sigmar_4e:liberators-1"] == 90
 
 
 def test_parse_catalogue_file_resolves_visible_entry_link_to_hidden_character(tmp_path: Path):

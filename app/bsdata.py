@@ -54,6 +54,17 @@ GAME_SYSTEMS: dict[str, GameSystemConfig] = {
         branch="master",
         catalogue_word="teams/operatives",
     ),
+    "age_of_sigmar_4e": GameSystemConfig(
+        id="age_of_sigmar_4e",
+        label="Warhammer Age of Sigmar 4th Edition",
+        short_label="AoS",
+        repo_slug="age-of-sigmar-4th",
+        repo_http_url="https://github.com/BSData/age-of-sigmar-4th",
+        repo_git_url="https://github.com/BSData/age-of-sigmar-4th.git",
+        repo_zip_url="https://github.com/BSData/age-of-sigmar-4th/archive/refs/heads/main.zip",
+        branch="main",
+        catalogue_word="warscrolls/units",
+    ),
 }
 
 
@@ -207,16 +218,7 @@ def _profile_characteristics(profile: ET.Element) -> dict[str, str]:
     return stats
 
 
-def _direct_cost(entry: ET.Element) -> float | None:
-    candidates: list[ET.Element] = []
-    for costs_node in _children(entry, "costs"):
-        candidates.extend(_children(costs_node, "cost"))
-
-    # Some BattleScribe files put costs deeper in links. Use a descendant
-    # fallback if there was no direct cost.
-    if not candidates:
-        candidates = [node for node in entry.iter() if _local_name(node.tag) == "cost"]
-
+def _point_cost(candidates: list[ET.Element]) -> float | None:
     for cost in candidates:
         name = (cost.attrib.get("name") or "").lower()
         type_id = (cost.attrib.get("typeId") or "").lower()
@@ -228,6 +230,25 @@ def _direct_cost(entry: ET.Element) -> float | None:
         except ValueError:
             continue
     return None
+
+
+def _direct_cost_candidates(entry: ET.Element) -> list[ET.Element]:
+    candidates: list[ET.Element] = []
+    for costs_node in _children(entry, "costs"):
+        candidates.extend(_children(costs_node, "cost"))
+    return candidates
+
+
+def _direct_cost(entry: ET.Element) -> float | None:
+    candidates = _direct_cost_candidates(entry)
+    direct_cost = _point_cost(candidates)
+    if direct_cost is not None:
+        return direct_cost
+    # Some BattleScribe files put costs deeper in links. Use a descendant
+    # fallback if there was no direct cost.
+    if not candidates:
+        candidates = [node for node in entry.iter() if _local_name(node.tag) == "cost"]
+    return _point_cost(candidates)
 
 
 def _category_keywords(entry: ET.Element) -> list[str]:
@@ -255,6 +276,11 @@ def _category_keywords(entry: ET.Element) -> list[str]:
             seen.add(key)
             keywords.append(name)
     return keywords
+
+
+def _catalogue_faction_name(root: ET.Element, path: Path) -> str:
+    faction = _clean_text(root.attrib.get("name")) or path.stem
+    return re.sub(r"\s+-\s+Library$", "", faction).strip() or faction
 
 
 def _unit_stats(entry: ET.Element) -> dict[str, str]:
@@ -467,7 +493,7 @@ def parse_catalogue_file(path: Path, game_system: str = DEFAULT_GAME_SYSTEM) -> 
     config = get_game_system_config(game_system)
     tree = ET.parse(path)
     root = tree.getroot()
-    faction = _clean_text(root.attrib.get("name")) or path.stem
+    faction = _catalogue_faction_name(root, path)
     catalogue_file = path.name
     units: list[ParsedUnit] = []
     seen_keys: set[tuple[str, str, str]] = set()
@@ -598,6 +624,29 @@ def _upsert_unit(conn: Any, unit: ParsedUnit, imported_at: str) -> None:
     )
 
 
+def _linked_entry_points(cat_files: list[Path], game_system: str) -> dict[str, float]:
+    points_by_bs_id: dict[str, float] = {}
+    for path in cat_files:
+        try:
+            root = ET.parse(path).getroot()
+        except Exception:
+            continue
+
+        for entry_link in root.iter():
+            if _local_name(entry_link.tag) != "entryLink":
+                continue
+            target_id = entry_link.attrib.get("targetId")
+            if not target_id:
+                continue
+            points = _point_cost(_direct_cost_candidates(entry_link))
+            if points is None:
+                continue
+            bs_id = _stable_id(path.name, _clean_text(entry_link.attrib.get("name")), {"id": target_id}, game_system)
+            points_by_bs_id.setdefault(bs_id, points)
+
+    return points_by_bs_id
+
+
 def import_bsdata(conn: Any, repo_dir: Path, game_system: str = DEFAULT_GAME_SYSTEM) -> ImportResult:
     config = get_game_system_config(game_system)
     repo_dir = repo_dir.resolve()
@@ -615,6 +664,7 @@ def import_bsdata(conn: Any, repo_dir: Path, game_system: str = DEFAULT_GAME_SYS
         p for p in repo_dir.rglob("*.cat")
         if ".git" not in p.parts and p.is_file()
     )
+    linked_points = _linked_entry_points(cat_files, config.id)
 
     for path in cat_files:
         files_scanned += 1
@@ -625,6 +675,8 @@ def import_bsdata(conn: Any, repo_dir: Path, game_system: str = DEFAULT_GAME_SYS
             continue
 
         for unit in parsed_units:
+            if unit.points is None:
+                unit.points = linked_points.get(unit.bs_id)
             _upsert_unit(conn, unit, now)
             units_imported += 1
 

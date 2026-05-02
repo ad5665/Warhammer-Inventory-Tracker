@@ -10,6 +10,7 @@ const state = {
 const fallbackSystems = [
   { id: "wh40k_10e", label: "Warhammer 40,000 10th Edition", short_label: "40k", catalogue_word: "units/models" },
   { id: "kill_team", label: "Warhammer 40,000: Kill Team", short_label: "Kill Team", catalogue_word: "teams/operatives" },
+  { id: "age_of_sigmar_4e", label: "Warhammer Age of Sigmar 4th Edition", short_label: "AoS", catalogue_word: "warscrolls/units" },
 ];
 
 const el = (id) => document.getElementById(id);
@@ -99,14 +100,20 @@ function updateGameCopy() {
   const system = activeSystem();
   el("active-game-label").textContent = system.short_label || system.label;
   el("game-title").textContent = `${system.short_label || system.label} Stock Tracker`;
-  el("game-subtitle").textContent = state.currentGame === "kill_team"
-    ? "Track Kill Team squads and operatives, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos."
-    : "Track Warhammer 40,000 units and models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.";
+  const subtitles = {
+    kill_team: "Track Kill Team squads and operatives, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.",
+    age_of_sigmar_4e: "Track Age of Sigmar armies and warscrolls, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.",
+    wh40k_10e: "Track Warhammer 40,000 units and models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.",
+  };
+  el("game-subtitle").textContent = subtitles[state.currentGame] || `Track ${system.label} models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.`;
   el("sync-copy").textContent = `Import the ${system.label} BSData catalogue. Later, click this again to pull updates.`;
   el("sync-btn").textContent = `Sync ${system.short_label || system.label} BSData`;
-  el("unit-query").placeholder = state.currentGame === "kill_team"
-    ? "Legionary, Kommandos, Angels of Death, Plague Marine..."
-    : "Boyz, Intercessors, Carnifex, Chaos Lord...";
+  const placeholders = {
+    kill_team: "Legionary, Kommandos, Angels of Death, Plague Marine...",
+    age_of_sigmar_4e: "Liberators, Clanrats, Blood Warriors, Treelord...",
+    wh40k_10e: "Boyz, Intercessors, Carnifex, Chaos Lord...",
+  };
+  el("unit-query").placeholder = placeholders[state.currentGame] || "Search catalogue entries...";
   el("export-link").href = withGame("/api/export.csv");
 }
 
@@ -122,7 +129,7 @@ async function loadFactions() {
   const select = el("faction-filter");
   const current = select.value;
   const factions = await api(withGame("/api/factions"));
-  select.innerHTML = '<option value="">All factions / teams</option>';
+  select.innerHTML = '<option value="">All factions / armies / teams</option>';
   for (const item of factions) {
     const option = document.createElement("option");
     option.value = item.faction;
@@ -134,7 +141,7 @@ async function loadFactions() {
 
 function unitStatsPills(unit) {
   const stats = unit.stats || {};
-  const wanted = ["M", "Move", "APL", "GA", "DF", "T", "Toughness", "SV", "Save", "W", "Wounds", "LD", "Leadership", "OC"];
+  const wanted = ["M", "Move", "APL", "GA", "DF", "T", "Toughness", "SV", "Save", "W", "Wounds", "Health", "LD", "Leadership", "OC", "Control"];
   const pills = [];
   const used = new Set();
   if (unit.entry_type) {
@@ -228,7 +235,7 @@ function textareaInput(item, field, rows = 2, placeholder = "") {
 
 function wargearStatSummary(option) {
   const stats = option.stats || {};
-  const preferred = ["Range", "R", "A", "BS", "WS", "WS/BS", "S", "AP", "D", "SR", "!"];
+  const preferred = ["Range", "R", "A", "Atk", "BS", "WS", "WS/BS", "Hit", "S", "Wnd", "AP", "Rnd", "D", "Dmg", "SR", "Ability", "!"];
   const parts = [];
   const used = new Set();
   for (const key of preferred) {
@@ -349,7 +356,7 @@ function renderInventory() {
           <div class="row-sub">${item.unit_id ? "BSData linked" : "Custom item"}</div>
           ${points}${inactive}
         </td>
-        <td>${textInput(item, "faction", "Faction / team")}</td>
+        <td>${textInput(item, "faction", "Faction / army / team")}</td>
         <td>${numberInput(item, "quantity")}</td>
         <td>${numberInput(item, "models_owned")}</td>
         <td>${numberInput(item, "built_count")}</td>

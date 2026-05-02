@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Warhammer Stock Tracker",
-    description="Track owned Warhammer 40,000 and Kill Team models using BSData catalogue imports and SQLite.",
+    description="Track owned Warhammer 40,000, Kill Team, and Age of Sigmar models using BSData catalogue imports and SQLite.",
     version="0.3.0",
     lifespan=lifespan,
 )

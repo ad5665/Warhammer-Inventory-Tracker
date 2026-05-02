@@ -11,7 +11,7 @@
     <div>
       <p class="eyebrow">Warhammer inventory</p>
       <h1 id="game-title">Stock Tracker</h1>
-      <p id="game-subtitle" class="subtitle">Track 40k and Kill Team models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.</p>
+      <p id="game-subtitle" class="subtitle">Track 40k, Kill Team, and Age of Sigmar models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.</p>
     </div>
     <div class="status-card">
       <div class="status-line"><span>Active tab</span><strong id="active-game-label">40k</strong></div>
@@ -26,6 +26,7 @@
     <nav id="game-tabs" class="game-tabs" aria-label="Game system tabs">
       <button type="button" class="tab active" data-game="wh40k_10e">40k</button>
       <button type="button" class="tab" data-game="kill_team">Kill Team</button>
+      <button type="button" class="tab" data-game="age_of_sigmar_4e">AoS</button>
     </nav>
 
     <section class="panel sync-panel">
@@ -45,7 +46,7 @@
             <input id="unit-query" type="search" placeholder="Boyz, Intercessors, Chaos Lord...">
           </label>
           <label>
-            Faction / team
+            Faction / army / team
             <select id="faction-filter">
               <option value="">All factions</option>
             </select>
@@ -59,7 +60,7 @@
         <p class="hint">Use this for boxed sets, objective markers, kitbash projects, terrain, or items not found in BSData.</p>
         <form id="custom-form" class="stacked-form">
           <label>Item name <input name="unit_name" required placeholder="Combat Patrol, spare Nob, terrain..."></label>
-          <label>Faction / team <input name="faction" placeholder="Optional"></label>
+          <label>Faction / army / team <input name="faction" placeholder="Optional"></label>
           <div class="form-row three">
             <label>Quantity <input name="quantity" type="number" min="0" value="1"></label>
             <label>Models <input name="models_owned" type="number" min="0" value="1"></label>
@@ -90,7 +91,7 @@
           <thead>
             <tr>
               <th>Unit / item</th>
-              <th>Faction / team</th>
+              <th>Faction / army / team</th>
               <th>Qty</th>
               <th>Models</th>
               <th>Built</th>
