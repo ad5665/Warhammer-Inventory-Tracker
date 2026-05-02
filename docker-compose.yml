@@ -1,0 +1,15 @@
+services:
+  web:
+    build: .
+    image: wh40k-stock-tracker
+    ports:
+      - "8000:8000"
+    environment:
+      WH40K_DATA_DIR: /app/data
+    volumes:
+      - wh40k-stock-data:/app/data
+
+volumes:
+  wh40k-stock-data:
+    name: wh40k-stock-data
+    external: true

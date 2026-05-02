@@ -8,7 +8,7 @@ A small Python web app for tracking which Warhammer 40,000 and Kill Team models 
 - **BSData/wh40k-10e** for Warhammer 40,000 catalogue data
 - **BSData/wh40k-killteam** for Kill Team catalogue data
 
-The app stores your inventory locally in `data/stock_tracker.db`, stores uploaded photos in `data/uploads/`, and downloads/clones BSData files into `data/bsdata/`.
+When run directly, the app stores your inventory locally in `data/stock_tracker.db`, stores uploaded photos in `data/uploads/`, and downloads/clones BSData files into `data/bsdata/`. In Docker, `/app/data` is backed by the `wh40k-stock-data` named volume.
 
 ## Features
 
@@ -52,9 +52,19 @@ Then choose the **40k** or **Kill Team** tab and click the sync button for that 
 
 ## Optional Docker run
 
+Create a named Docker volume once, then run with Compose. The SQLite database, uploads, and downloaded BSData live in `wh40k-stock-data`, so they survive container recreation:
+
+```bash
+docker volume create wh40k-stock-data
+docker compose up --build
+```
+
+Or with plain Docker:
+
 ```bash
 docker build -t wh40k-stock-tracker .
-docker run --rm -p 8000:8000 -v "$(pwd)/data:/app/data" wh40k-stock-tracker
+docker volume create wh40k-stock-data
+docker run --rm -p 8000:8000 --mount source=wh40k-stock-data,target=/app/data wh40k-stock-tracker
 ```
 
 Then open `http://127.0.0.1:8000`.
@@ -105,7 +115,7 @@ Main endpoints:
 
 `bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles discovered in the `.cat` XML. `inventory_items` contains your own collection, also scoped by `game_system`, including `wargear_selections_json` for the quantities you picked in the UI. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
 
-Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`. They are served locally by the app under `/uploads/...` and are not sent anywhere.
+Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`, or `/app/data/uploads/inventory/{inventory_item_id}/` in Docker. They are served locally by the app under `/uploads/...` and are not sent anywhere.
 
 ## Upgrading from the first version
 
