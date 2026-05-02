@@ -273,9 +273,7 @@ function renderWargear(item) {
                 <small>${esc(option.kind || "Weapon")}${stats ? ` · ${esc(stats)}` : ""}</small>
               </div>
               <div class="qty-stepper" aria-label="${esc(option.name)} quantity">
-                <button type="button" class="qty-btn" onclick="adjustWargear(${item.id}, ${jsArg(option.key)}, -1)">-</button>
                 <input data-wargear-key="${esc(option.key)}" type="number" min="0" max="999" step="1" value="${value}">
-                <button type="button" class="qty-btn" onclick="adjustWargear(${item.id}, ${jsArg(option.key)}, 1)">+</button>
               </div>
             </div>
           `;
@@ -296,16 +294,6 @@ function collectWargearSelections(row) {
     }
   });
   return selections;
-}
-
-function adjustWargear(itemId, key, delta) {
-  const row = document.querySelector(`tr[data-id="${itemId}"]`);
-  if (!row) return;
-  const input = Array.from(row.querySelectorAll("[data-wargear-key]"))
-    .find(candidate => candidate.dataset.wargearKey === key);
-  if (!input) return;
-  const current = Number(input.value || 0);
-  input.value = Math.max(0, Math.min(999, current + delta));
 }
 
 function renderPhotos(item) {
@@ -560,7 +548,6 @@ window.saveItem = saveItem;
 window.deleteItem = deleteItem;
 window.uploadImage = uploadImage;
 window.deleteImage = deleteImage;
-window.adjustWargear = adjustWargear;
 
 // Load the app.
 document.addEventListener("DOMContentLoaded", async () => {
