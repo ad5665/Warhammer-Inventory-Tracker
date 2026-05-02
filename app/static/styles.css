@@ -232,6 +232,17 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
+.inventory-composition {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin-top: 0;
+}
+.inventory-detail-row td {
+  padding-top: 0;
+}
+.inventory-row-has-detail > td:not([rowspan]) {
+  border-bottom: 0;
+  padding-bottom: 6px;
+}
 
 .empty, .empty-cell {
   color: var(--muted);
@@ -342,8 +353,13 @@ td textarea { min-width: 220px; }
   border-radius: 8px;
   background: #0f1620;
 }
-.copy-card label {
+.copy-card label,
+.copy-field-label {
   font-size: 0.78rem;
+}
+.copy-field {
+  display: grid;
+  gap: 8px;
 }
 .copy-card input,
 .copy-card textarea,
@@ -376,6 +392,29 @@ td textarea { min-width: 220px; }
   max-height: 245px;
   overflow: auto;
   padding-right: 4px;
+}
+.copy-wargear-grouped {
+  max-height: 340px;
+  overflow: auto;
+  padding-right: 4px;
+}
+.copy-wargear-group {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(16, 24, 33, 0.55);
+}
+.copy-wargear-group .copy-wargear-picker {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+.copy-wargear-group-title {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 .copy-wargear-row {
   display: grid;

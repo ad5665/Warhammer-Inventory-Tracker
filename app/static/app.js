@@ -264,15 +264,17 @@ function wargearNames(options, limit = 8) {
   return `${visible.join(", ")}${suffix}`;
 }
 
-function renderModelComposition(unit) {
+function renderModelComposition(unit, options = {}) {
   const components = unit.model_composition || [];
   if (!components.length) return "";
 
+  const className = ["composition-list", options.className].filter(Boolean).join(" ");
+  const wargearLimit = options.wargearLimit ?? 8;
   return `
-    <div class="composition-list">
+    <div class="${className}">
       ${components.map(component => {
         const count = componentCountText(component);
-        const gear = wargearNames(component.wargear_options || []);
+        const gear = wargearNames(component.wargear_options || [], wargearLimit);
         return `
           <div class="composition-row">
             <strong>${count ? `${esc(count)} ` : ""}${esc(component.name)}</strong>
@@ -419,11 +421,57 @@ function copyTextareaInput(copy, field, rows = 2, placeholder = "") {
   return `<textarea data-copy-field="${field}" rows="${rows}" placeholder="${esc(placeholder)}">${esc(copy[field] || "")}</textarea>`;
 }
 
+function copyWargearSelectionKey(component, option) {
+  return `${component.key}::${option.key}`;
+}
+
+function copyWargearSelectionValue(selections, key, optionKey, isDuplicateOption) {
+  if (selections[key] !== undefined) {
+    const exactValue = Number(selections[key] || 0);
+    return Number.isFinite(exactValue) ? exactValue : 0;
+  }
+
+  const hasGroupedSelections = Object.keys(selections).some(selectionKey => selectionKey.includes("::"));
+  if (!hasGroupedSelections && !isDuplicateOption && selections[optionKey] !== undefined) {
+    const legacyValue = Number(selections[optionKey] || 0);
+    return Number.isFinite(legacyValue) ? legacyValue : 0;
+  }
+
+  return 0;
+}
+
+function componentWargearOptionCounts(components) {
+  const counts = new Map();
+  for (const component of components) {
+    for (const option of component.wargear_options || []) {
+      counts.set(option.key, (counts.get(option.key) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+function renderCopyWargearRow(option, key, value, labelPrefix = "") {
+  const stats = wargearStatSummary(option);
+  const label = `${labelPrefix}${option.name}`;
+  return `
+    <div class="copy-wargear-row">
+      <div class="wargear-name">
+        <span>${esc(option.name)}</span>
+        <small>${esc(option.kind || "Weapon")}${stats ? ` · ${esc(stats)}` : ""}</small>
+      </div>
+      <div class="qty-stepper" aria-label="${esc(label)} quantity">
+        <input data-copy-wargear-key="${esc(key)}" type="number" min="0" max="999" step="1" value="${value}">
+      </div>
+    </div>
+  `;
+}
+
 function renderCopyWargear(item, copy) {
   const options = item.wargear_options || item.current_wargear_options || [];
+  const components = (item.model_composition || []).filter(component => (component.wargear_options || []).length);
   const selections = copy.wargear_selections || {};
 
-  if (!options.length) {
+  if (!options.length && !components.length) {
     return `
       <div class="copy-wargear wargear-fallback">
         ${copyTextareaInput(copy, "wargear", 2, "Weapons / specialist gear")}
@@ -432,24 +480,33 @@ function renderCopyWargear(item, copy) {
     `;
   }
 
+  if (components.length) {
+    const optionCounts = componentWargearOptionCounts(components);
+    return `
+      <div class="copy-wargear copy-wargear-grouped">
+        ${components.map(component => {
+          const count = componentCountText(component);
+          return `
+            <section class="copy-wargear-group">
+              <div class="copy-wargear-group-title">${count ? `${esc(count)} ` : ""}${esc(component.name)}</div>
+              <div class="copy-wargear-picker">
+                ${(component.wargear_options || []).map(option => {
+                  const key = copyWargearSelectionKey(component, option);
+                  const value = copyWargearSelectionValue(selections, key, option.key, (optionCounts.get(option.key) || 0) > 1);
+                  return renderCopyWargearRow(option, key, value, `${component.name} `);
+                }).join("")}
+              </div>
+            </section>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
   return `
     <div class="copy-wargear">
       <div class="copy-wargear-picker">
-        ${options.map(option => {
-          const value = Number(selections[option.key] || 0);
-          const stats = wargearStatSummary(option);
-          return `
-            <div class="copy-wargear-row">
-              <div class="wargear-name">
-                <span>${esc(option.name)}</span>
-                <small>${esc(option.kind || "Weapon")}${stats ? ` · ${esc(stats)}` : ""}</small>
-              </div>
-              <div class="qty-stepper" aria-label="${esc(option.name)} quantity">
-                <input data-copy-wargear-key="${esc(option.key)}" type="number" min="0" max="999" step="1" value="${value}">
-              </div>
-            </div>
-          `;
-        }).join("")}
+        ${options.map(option => renderCopyWargearRow(option, option.key, Number(selections[option.key] || 0))).join("")}
       </div>
     </div>
   `;
@@ -696,7 +753,6 @@ function renderCopies(item) {
 
   const quantity = Number(item.quantity || copies.length);
   return `
-    ${renderModelComposition(item)}
     <div class="copy-grid">
       ${copies.map(copy => `
         <section class="copy-card" data-copy-id="${copy.id}">
@@ -713,10 +769,10 @@ function renderCopies(item) {
               ${copyTextInput(copy, "storage_location", "Shelf / case")}
             </label>
           </div>
-          <label>
-            Wargear built with
+          <div class="copy-field">
+            <div class="copy-field-label">Wargear built with</div>
             ${renderCopyWargear(item, copy)}
-          </label>
+          </div>
           <label>
             Photos
             ${renderCopyPhotos(item, copy)}
@@ -750,6 +806,22 @@ function renderCopyCell(item) {
     `;
   }
   return renderCopies(item);
+}
+
+function renderInventoryModelComposition(item) {
+  const composition = renderModelComposition(item, {
+    className: "inventory-composition",
+    wargearLimit: 24,
+  });
+  if (!composition) return "";
+
+  return `
+    <tr class="inventory-detail-row">
+      <td colspan="7">
+        ${composition}
+      </td>
+    </tr>
+  `;
 }
 
 function renderPhotos(item) {
@@ -802,8 +874,10 @@ function renderInventory() {
     const unitSize = unitSizeText(item);
     const size = unitSize ? `<div class="row-sub">Valid size: ${esc(unitSize)}</div>` : "";
     const collapsed = isInventoryItemCollapsed(item.id);
+    const compositionRow = collapsed ? "" : renderInventoryModelComposition(item);
+    const rowSpan = compositionRow ? ' rowspan="2"' : "";
     return `
-      <tr data-id="${item.id}" class="${collapsed ? "inventory-row-collapsed" : ""}">
+      <tr data-id="${item.id}" class="${[collapsed ? "inventory-row-collapsed" : "", compositionRow ? "inventory-row-has-detail" : ""].filter(Boolean).join(" ")}">
         <td>
           <div class="row-heading">
             <button
@@ -828,14 +902,15 @@ function renderInventory() {
         <td>${numberInput(item, "built_count")}</td>
         <td>${numberInput(item, "painted_count")}</td>
         <td><span class="backlog" data-backlog="build">${item.unbuilt_count} build</span><br><span class="backlog" data-backlog="paint">${item.unpainted_count} paint</span></td>
-        <td class="copy-cell">${renderCopyCell(item)}</td>
-        <td>
+        <td class="copy-cell"${rowSpan}>${renderCopyCell(item)}</td>
+        <td${rowSpan}>
           <div class="actions">
             <button class="secondary" onclick="cloneItem(${item.id})">Clone</button>
             <button class="danger" onclick="deleteItem(${item.id})">Delete</button>
           </div>
         </td>
       </tr>
+      ${compositionRow}
     `;
   }).join("");
   renderInventorySummary();

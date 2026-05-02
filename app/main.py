@@ -804,14 +804,43 @@ def _decode_wargear_selections(raw: str | None) -> dict[str, int]:
     return _clean_wargear_selections(decoded)
 
 
-def _format_wargear_summary(selections: dict[str, int], options: list[dict[str, Any]]) -> str | None:
+def _copy_wargear_selection_key(component: dict[str, Any], option: dict[str, Any]) -> str:
+    return f"{component['key']}::{option['key']}"
+
+
+def _wargear_summary_labels(
+    options: list[dict[str, Any]],
+    model_composition: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, str], dict[str, int]]:
+    labels: dict[str, str] = {}
+    order: dict[str, int] = {}
+
+    for component in model_composition or []:
+        component_name = component.get("name") or ""
+        for option in component.get("wargear_options", []):
+            key = _copy_wargear_selection_key(component, option)
+            labels[key] = f"{component_name}: {option['name']}" if component_name else option["name"]
+            order.setdefault(key, len(order))
+
+    for option in options:
+        labels.setdefault(option["key"], option["name"])
+        order.setdefault(option["key"], len(order))
+
+    return labels, order
+
+
+def _format_wargear_summary(
+    selections: dict[str, int],
+    options: list[dict[str, Any]],
+    model_composition: list[dict[str, Any]] | None = None,
+) -> str | None:
     if not selections:
         return None
-    options_by_key = {option["key"]: option for option in options}
+    labels, order = _wargear_summary_labels(options, model_composition)
     parts: list[str] = []
-    for key in sorted(selections, key=lambda item: options_by_key.get(item, {}).get("name", item).lower()):
+    for key in sorted(selections, key=lambda item: (order.get(item, len(order)), labels.get(item, item).lower())):
         amount = selections[key]
-        name = options_by_key.get(key, {}).get("name") or key
+        name = labels.get(key) or key
         parts.append(f"{amount}x {name}")
     return ", ".join(parts) or None
 
@@ -911,7 +940,11 @@ def uploaded_inventory_image(request: Request, item_id: int, file_name: str) -> 
     return FileResponse(path)
 
 
-def _copy_payload_data(payload: InventoryCopyPayload, wargear_options: list[dict[str, Any]]) -> dict[str, Any]:
+def _copy_payload_data(
+    payload: InventoryCopyPayload,
+    wargear_options: list[dict[str, Any]],
+    model_composition: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     data = payload.model_dump()
     data["model_number"] = _clean_optional(data.get("model_number"))
     data["storage_location"] = _clean_optional(data.get("storage_location"))
@@ -921,7 +954,7 @@ def _copy_payload_data(payload: InventoryCopyPayload, wargear_options: list[dict
     data["wargear_selections_json"] = json.dumps(data["wargear_selections"], sort_keys=True) if data["wargear_selections"] else None
 
     if data["wargear_selections"]:
-        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options)
+        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options, model_composition)
 
     return data
 
@@ -1116,9 +1149,15 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
     data["notes"] = _clean_textarea(data.get("notes"))
 
     wargear_options: list[dict[str, Any]] = []
+    model_composition: list[dict[str, Any]] = []
     if data.get("unit_id") is not None:
         unit = conn.execute(
-            "SELECT id, game_system, name, faction, catalogue_file, wargear_options_json FROM bsd_units WHERE id = ?",
+            """
+            SELECT id, game_system, name, faction, catalogue_file,
+                   wargear_options_json, model_composition_json
+            FROM bsd_units
+            WHERE id = ?
+            """,
             (data["unit_id"],),
         ).fetchone()
         if unit is None:
@@ -1128,9 +1167,10 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
         data["faction"] = data["faction"] or unit["faction"]
         data["catalogue_file"] = data["catalogue_file"] or unit["catalogue_file"]
         wargear_options = _decode_wargear_options(unit["wargear_options_json"])
+        model_composition = _decode_model_composition(unit["model_composition_json"])
 
     if data["wargear_selections"]:
-        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options)
+        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options, model_composition)
 
     if not data.get("unit_name"):
         raise HTTPException(status_code=400, detail="unit_name is required for custom inventory items.")
@@ -1173,11 +1213,15 @@ def _inventory_item_response(conn: Any, item_id: int, owner_user_id: int | None)
     return item
 
 
-def _item_wargear_options(conn: Any, item_id: int, owner_user_id: int | None) -> list[dict[str, Any]]:
+def _item_wargear_catalogue(
+    conn: Any,
+    item_id: int,
+    owner_user_id: int | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     row = conn.execute(
         f"""
-        SELECT u.wargear_options_json
+        SELECT u.wargear_options_json, u.model_composition_json
         FROM inventory_items i
         LEFT JOIN bsd_units u ON u.id = i.unit_id
         WHERE i.id = ? AND {owner_clause}
@@ -1186,7 +1230,10 @@ def _item_wargear_options(conn: Any, item_id: int, owner_user_id: int | None) ->
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Inventory item not found.")
-    return _decode_wargear_options(row["wargear_options_json"])
+    return (
+        _decode_wargear_options(row["wargear_options_json"]),
+        _decode_model_composition(row["model_composition_json"]),
+    )
 
 
 def _safe_image_role(image_role: str | None) -> str:
@@ -1579,7 +1626,8 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
         if copy_row is None:
             raise HTTPException(status_code=404, detail="Inventory copy not found.")
 
-        data = _copy_payload_data(payload, _item_wargear_options(conn, item_id, owner_user_id))
+        wargear_options, model_composition = _item_wargear_catalogue(conn, item_id, owner_user_id)
+        data = _copy_payload_data(payload, wargear_options, model_composition)
         conn.execute(
             f"""
             UPDATE inventory_copies SET
