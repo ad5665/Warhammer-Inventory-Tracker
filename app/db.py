@@ -113,6 +113,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 inventory_item_id INTEGER NOT NULL,
                 copy_number INTEGER NOT NULL CHECK(copy_number >= 1),
+                models_owned INTEGER NOT NULL DEFAULT 0 CHECK(models_owned >= 0),
                 model_number TEXT,
                 wargear TEXT,
                 wargear_selections_json TEXT,
@@ -171,8 +172,21 @@ def init_db() -> None:
         _ensure_column(conn, "inventory_items", "wargear", "wargear TEXT")
         _ensure_column(conn, "inventory_items", "wargear_selections_json", "wargear_selections_json TEXT")
         _ensure_column(conn, "inventory_items", "model_number", "model_number TEXT")
+        _ensure_column(conn, "inventory_copies", "models_owned", "models_owned INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "inventory_images", "inventory_copy_id", "inventory_copy_id INTEGER")
         _ensure_column(conn, "import_runs", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
+
+        conn.execute(
+            """
+            UPDATE inventory_copies
+            SET models_owned = (
+                SELECT COALESCE(i.models_owned, 0)
+                FROM inventory_items i
+                WHERE i.id = inventory_copies.inventory_item_id
+            )
+            WHERE COALESCE(models_owned, 0) = 0
+            """
+        )
 
         conn.executescript(
             """

@@ -44,6 +44,8 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          build-args: |
+            WH40K_BUILD_VERSION=${{ github.sha }}
           load: true
           tags: wh40k-stock-tracker:ci
 

@@ -4,6 +4,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
+ARG WH40K_BUILD_VERSION
+ENV WH40K_BUILD_VERSION=${WH40K_BUILD_VERSION}
 ENV WH40K_AUTH_ENABLED=false
 VOLUME ["/app/data"]
 EXPOSE 8000

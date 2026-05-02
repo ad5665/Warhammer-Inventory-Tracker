@@ -177,6 +177,14 @@ button, .button-link, .file-button {
 }
 button:hover, .button-link:hover, .file-button:hover { filter: brightness(1.05); }
 button:disabled { opacity: 0.65; cursor: not-allowed; }
+input.locked-number,
+input:disabled.locked-number {
+  background: rgba(170, 184, 198, 0.14);
+  border-color: rgba(170, 184, 198, 0.22);
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
 .secondary { background: #d9e4ef; box-shadow: none; }
 .danger { background: var(--danger); color: #260a08; box-shadow: none; }
 .ghost { background: var(--panel-soft); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
@@ -273,7 +281,6 @@ table {
 .inventory-table .col-faction { width: 180px; }
 .inventory-table .col-number { width: 95px; }
 .inventory-table .col-backlog { width: 120px; }
-.inventory-table .col-copies { width: 620px; }
 .inventory-table .col-actions { width: 130px; }
 th, td {
   text-align: left;
@@ -324,12 +331,6 @@ td textarea { min-width: 220px; }
   line-height: 1;
 }
 
-.copy-cell {
-  min-width: 520px;
-}
-.inventory-row-collapsed .copy-cell {
-  min-width: 240px;
-}
 .copy-detail-cell {
   min-width: 0;
 }
@@ -385,7 +386,7 @@ td textarea { min-width: 220px; }
 }
 .copy-form-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px;
 }
 .copy-wargear,

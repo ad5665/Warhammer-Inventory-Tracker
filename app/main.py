@@ -83,6 +83,7 @@ class InventoryPayload(BaseModel):
 
 
 class InventoryCopyPayload(BaseModel):
+    models_owned: int | None = Field(default=None, ge=0)
     model_number: str | None = None
     wargear: str | None = None
     wargear_selections: dict[str, int] | None = None
@@ -203,6 +204,33 @@ def ensure_initial_admin_user() -> None:
 def _escape(value: Any) -> str:
     return html.escape(str(value if value is not None else ""))
 
+
+def _static_asset_version() -> str:
+    configured = os.getenv("WH40K_BUILD_VERSION") or os.getenv("WH40K_ASSET_VERSION")
+    if configured:
+        return configured[:64]
+
+    digest = hashlib.sha256()
+    for asset_name in ("styles.css", "app.js"):
+        path = STATIC_DIR / asset_name
+        digest.update(asset_name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+STATIC_ASSET_VERSION = _static_asset_version()
+
+
+def _versioned_index_html() -> str:
+    asset_version = quote(STATIC_ASSET_VERSION, safe="")
+    content = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    return (
+        content
+        .replace("/static/styles.css", f"/static/styles.css?v={asset_version}")
+        .replace("/static/app.js", f"/static/app.js?v={asset_version}")
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -220,8 +248,14 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def index() -> HTMLResponse:
+    return HTMLResponse(
+        _versioned_index_html(),
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 def _public_auth_path(path: str) -> bool:
@@ -946,6 +980,7 @@ def _copy_payload_data(
     model_composition: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     data = payload.model_dump()
+    data["models_owned"] = _safe_optional_int(data.get("models_owned"))
     data["model_number"] = _clean_optional(data.get("model_number"))
     data["storage_location"] = _clean_optional(data.get("storage_location"))
     data["wargear"] = _clean_textarea(data.get("wargear"))
@@ -961,6 +996,7 @@ def _copy_payload_data(
 
 def _inventory_copy_dict(row: Any) -> dict[str, Any]:
     copy = dict(row)
+    copy["models_owned"] = max(int(copy.get("models_owned") or 0), 0)
     copy["wargear_selections"] = _decode_wargear_selections(copy.pop("wargear_selections_json", None))
     copy.setdefault("images", [])
     return copy
@@ -969,6 +1005,7 @@ def _inventory_copy_dict(row: Any) -> dict[str, Any]:
 def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
     if copy_number != 1:
         return {
+            "models_owned": item["models_owned"],
             "model_number": None,
             "wargear": None,
             "wargear_selections_json": None,
@@ -977,6 +1014,7 @@ def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
         }
 
     return {
+        "models_owned": item["models_owned"],
         "model_number": item["model_number"],
         "wargear": item["wargear"],
         "wargear_selections_json": item["wargear_selections_json"],
@@ -1002,13 +1040,15 @@ def _ensure_inventory_copies(conn: Any, item: Any) -> None:
         conn.execute(
             """
             INSERT INTO inventory_copies (
-                inventory_item_id, copy_number, model_number, wargear,
-                wargear_selections_json, storage_location, notes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                inventory_item_id, copy_number, models_owned, model_number,
+                wargear, wargear_selections_json, storage_location, notes,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item_id,
                 copy_number,
+                seed["models_owned"],
                 seed["model_number"],
                 seed["wargear"],
                 seed["wargear_selections_json"],
@@ -1631,6 +1671,7 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
         conn.execute(
             f"""
             UPDATE inventory_copies SET
+                models_owned = COALESCE(?, models_owned),
                 model_number = ?,
                 wargear = ?,
                 wargear_selections_json = ?,
@@ -1645,6 +1686,7 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
               )
             """,
             [
+                data["models_owned"],
                 data["model_number"],
                 data["wargear"],
                 data["wargear_selections_json"],

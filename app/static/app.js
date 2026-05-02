@@ -237,6 +237,20 @@ function unitSizeText(unit) {
   return "";
 }
 
+function isFixedSingleModelUnit(unit) {
+  const min = Number(unit?.min_models ?? unit?.current_min_models);
+  const max = Number(unit?.max_models ?? unit?.current_max_models);
+  return Number.isFinite(min) && Number.isFinite(max) && min === 1 && max === 1;
+}
+
+function usesPerCopyModels(unit) {
+  const min = Number(unit?.min_models ?? unit?.current_min_models);
+  const max = Number(unit?.max_models ?? unit?.current_max_models);
+  const hasMin = Number.isFinite(min) && min > 0;
+  const hasMax = Number.isFinite(max) && max > 0;
+  return (hasMin || hasMax) && !isFixedSingleModelUnit(unit);
+}
+
 function componentCountText(component) {
   const min = Number(component?.min_models);
   const max = Number(component?.max_models);
@@ -417,6 +431,10 @@ function copyTextInput(copy, field, placeholder = "") {
   return `<input data-copy-field="${field}" value="${esc(copy[field] || "")}" placeholder="${esc(placeholder)}">`;
 }
 
+function copyNumberInput(copy, field, width = 76) {
+  return `<input data-copy-field="${field}" type="number" min="0" value="${Number(copy[field] || 0)}" style="width:${width}px">`;
+}
+
 function copyTextareaInput(copy, field, rows = 2, placeholder = "") {
   return `<textarea data-copy-field="${field}" rows="${rows}" placeholder="${esc(placeholder)}">${esc(copy[field] || "")}</textarea>`;
 }
@@ -541,8 +559,25 @@ function rowNumberField(row, field) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function itemModelCount(item, row = null) {
+  if (usesPerCopyModels(item)) {
+    const total = (item.copies || []).reduce((sum, copy) => {
+      const input = document.querySelector(`[data-copy-id="${copy.id}"] [data-copy-field="models_owned"]`);
+      const value = input ? Number(input.value || 0) : Number(copy.models_owned || 0);
+      return sum + (Number.isFinite(value) ? value : 0);
+    }, 0);
+    if (total > 0 || (item.copies || []).length) return total;
+  }
+
+  const rowValue = row?.querySelector('[data-field="models_owned"]')?.value;
+  const value = rowValue !== undefined ? Number(rowValue || 0) : Number(item.models_owned || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
 function updateRowBacklog(row) {
-  const modelsOwned = rowNumberField(row, "models_owned");
+  const itemId = Number(row.dataset.id || 0);
+  const item = state.inventory.find(candidate => candidate.id === itemId);
+  const modelsOwned = item ? itemModelCount(item, row) : 0;
   const builtCount = rowNumberField(row, "built_count");
   const paintedCount = rowNumberField(row, "painted_count");
   const buildBacklog = Math.max(modelsOwned - builtCount, 0);
@@ -563,7 +598,7 @@ function inventorySummaryRecord(item) {
   };
 
   const quantity = numberField("quantity");
-  const modelsOwned = numberField("models_owned");
+  const modelsOwned = itemModelCount(item, row);
   const builtCount = numberField("built_count");
   const paintedCount = numberField("painted_count");
   const points = Number(item.current_points ?? 0);
@@ -752,14 +787,21 @@ function renderCopies(item) {
   }
 
   const quantity = Number(item.quantity || copies.length);
+  const showCopyModels = usesPerCopyModels(item);
   return `
     <div class="copy-grid">
       ${copies.map(copy => `
         <section class="copy-card" data-copy-id="${copy.id}">
           <div class="copy-header">
-            <strong>Copy ${esc(copy.copy_number)}${quantity > 1 ? ` of ${esc(quantity)}` : ""}</strong>
+            <strong>Unit ${esc(copy.copy_number)}</strong>
           </div>
           <div class="copy-form-grid">
+            ${showCopyModels ? `
+              <label>
+                Models
+                ${copyNumberInput(copy, "models_owned")}
+              </label>
+            ` : ""}
             <label>
               Base #
               ${copyTextInput(copy, "model_number", "Base #")}
@@ -787,27 +829,6 @@ function renderCopies(item) {
   `;
 }
 
-function copyBoxLabel(item) {
-  const count = (item.copies || []).length || Number(item.quantity || 0);
-  return `${count} ${count === 1 ? "copy box" : "copy boxes"}`;
-}
-
-function renderCopyCell(item) {
-  if (isInventoryItemCollapsed(item.id)) {
-    return `
-      <button
-        type="button"
-        class="collapsed-copy-summary"
-        data-collapse-toggle="${item.id}"
-        aria-expanded="false"
-      >
-        ${esc(copyBoxLabel(item))} hidden
-      </button>
-    `;
-  }
-  return `<div class="row-sub">${esc(copyBoxLabel(item))} below</div>`;
-}
-
 function renderInventoryModelCompositionRow(item) {
   const composition = renderModelComposition(item, {
     className: "inventory-composition",
@@ -817,7 +838,7 @@ function renderInventoryModelCompositionRow(item) {
 
   return `
     <tr class="inventory-composition-row">
-      <td colspan="7">
+      <td colspan="5">
         ${composition}
       </td>
       <td colspan="2"></td>
@@ -828,7 +849,7 @@ function renderInventoryModelCompositionRow(item) {
 function renderInventoryCopiesRow(item) {
   return `
     <tr data-id="${item.id}" class="inventory-copy-row">
-      <td colspan="9" class="copy-detail-cell">
+      <td colspan="7" class="copy-detail-cell">
         ${renderCopies(item)}
       </td>
     </tr>
@@ -874,7 +895,7 @@ function renderPhotos(item) {
 function renderInventory() {
   const body = el("inventory-body");
   if (!state.inventory.length) {
-    body.innerHTML = '<tr><td colspan="9" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
     renderInventorySummary();
     return;
   }
@@ -886,6 +907,9 @@ function renderInventory() {
     const size = unitSize ? `<div class="row-sub">Valid size: ${esc(unitSize)}</div>` : "";
     const collapsed = isInventoryItemCollapsed(item.id);
     const detailRows = collapsed ? "" : `${renderInventoryModelCompositionRow(item)}${renderInventoryCopiesRow(item)}`;
+    const modelsOwned = itemModelCount(item);
+    const unbuiltCount = Math.max(modelsOwned - Number(item.built_count || 0), 0);
+    const unpaintedCount = Math.max(modelsOwned - Number(item.painted_count || 0), 0);
     return `
       <tr data-id="${item.id}" class="${[collapsed ? "inventory-row-collapsed" : "", detailRows ? "inventory-row-has-detail" : ""].filter(Boolean).join(" ")}">
         <td>
@@ -908,11 +932,9 @@ function renderInventory() {
         </td>
         <td>${textInput(item, "faction", "Faction / army / team")}</td>
         <td>${numberInput(item, "quantity")}</td>
-        <td>${numberInput(item, "models_owned")}</td>
         <td>${numberInput(item, "built_count")}</td>
         <td>${numberInput(item, "painted_count")}</td>
-        <td><span class="backlog" data-backlog="build">${item.unbuilt_count} build</span><br><span class="backlog" data-backlog="paint">${item.unpainted_count} paint</span></td>
-        <td class="copy-cell">${renderCopyCell(item)}</td>
+        <td><span class="backlog" data-backlog="build">${unbuiltCount} build</span><br><span class="backlog" data-backlog="paint">${unpaintedCount} paint</span></td>
         <td>
           <div class="actions">
             <button class="secondary" onclick="cloneItem(${item.id})">Clone</button>
@@ -946,7 +968,7 @@ function collectItemPayload(itemId) {
     catalogue_file: original.catalogue_file,
     faction: field("faction"),
     quantity: numberField("quantity"),
-    models_owned: numberField("models_owned"),
+    models_owned: itemModelCount(original, row),
     built_count: numberField("built_count"),
     painted_count: numberField("painted_count"),
     wargear: original.wargear,
@@ -997,13 +1019,18 @@ function collectCopyPayload(copyId) {
   const card = document.querySelector(`[data-copy-id="${copyId}"]`);
   if (!card) throw new Error("Could not find copy box.");
   const field = (name) => card.querySelector(`[data-copy-field="${name}"]`)?.value || "";
-  return {
+  const payload = {
     model_number: field("model_number"),
     wargear: field("wargear"),
     wargear_selections: collectCopyWargearSelections(card),
     storage_location: field("storage_location"),
     notes: field("notes"),
   };
+  const modelsInput = card.querySelector('[data-copy-field="models_owned"]');
+  if (modelsInput) {
+    payload.models_owned = Number(modelsInput.value || 0);
+  }
+  return payload;
 }
 
 async function autosaveCopy(itemId, copyId, payload) {
