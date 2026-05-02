@@ -90,6 +90,8 @@ class ModelCompositionEntry:
     min_models: int | None = None
     max_models: int | None = None
     wargear_options: list[WargearOption] = field(default_factory=list)
+    composition_options: list[str] = field(default_factory=list)
+    display_in_composition: bool = True
 
 
 @dataclass
@@ -366,6 +368,13 @@ def _is_command_model_name(name: str) -> bool:
     return bool(_COMMAND_MODEL_RE.search(name))
 
 
+def _is_unit_composition_group(entry: ET.Element) -> bool:
+    return (
+        _local_name(entry.tag) == "selectionEntryGroup"
+        and _clean_text(entry.attrib.get("name")).lower() == "unit composition"
+    )
+
+
 def _direct_selection_children(entry: ET.Element) -> list[ET.Element]:
     children: list[ET.Element] = []
     for container_name in ("selectionEntries", "selectionEntryGroups", "entryLinks"):
@@ -433,6 +442,64 @@ def _contains_model_entry(
     return False
 
 
+def _linked_model_size(
+    source: ET.Element,
+    target: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+) -> _UnitSize | None:
+    minimum, maximum = _selection_constraints(source)
+    if minimum is not None or maximum is not None:
+        return _UnitSize(minimum or 0, maximum)
+    return _unit_size_for_entry(target, selection_index, group_index)
+
+
+def _unit_composition_choice_size(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+) -> _UnitSize | None:
+    child_sizes: list[_UnitSize] = []
+    for child in _direct_selection_children(entry):
+        target = _resolve_selection_reference(child, selection_index, group_index)
+        if _local_name(target.tag) != "selectionEntry":
+            continue
+        if (target.attrib.get("type") or "").lower().strip() != "model":
+            continue
+        size = _linked_model_size(child, target, selection_index, group_index)
+        if size is not None:
+            child_sizes.append(size)
+
+    if not child_sizes:
+        return None
+
+    minimum = sum(size.min_models for size in child_sizes)
+    maximum = None if any(size.max_models is None for size in child_sizes) else sum(
+        size.max_models or 0 for size in child_sizes
+    )
+    return _UnitSize(minimum, maximum)
+
+
+def _unit_composition_group_size(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+) -> _UnitSize | None:
+    choice_sizes = [
+        size
+        for child in _direct_selection_children(entry)
+        if (size := _unit_composition_choice_size(child, selection_index, group_index)) is not None
+    ]
+    if not choice_sizes:
+        return None
+
+    minimum = min(size.min_models for size in choice_sizes)
+    maximum = None if any(size.max_models is None for size in choice_sizes) else max(
+        size.max_models or 0 for size in choice_sizes
+    )
+    return _UnitSize(minimum, maximum)
+
+
 def _unit_size_for_entry(
     entry: ET.Element,
     selection_index: dict[str, ET.Element],
@@ -471,6 +538,10 @@ def _unit_size_for_entry(
     if local == "selectionEntryGroup":
         if not _contains_model_entry(entry, selection_index, group_index):
             return None
+        if _is_unit_composition_group(entry):
+            unit_composition_size = _unit_composition_group_size(entry, selection_index, group_index)
+            if unit_composition_size is not None:
+                return unit_composition_size
         minimum, maximum = _selection_constraints(entry)
         if minimum is not None or maximum is not None:
             return _UnitSize(minimum or 0, maximum)
@@ -683,6 +754,122 @@ def _component_from_model(
     )
 
 
+def _component_from_linked_model(
+    source: ET.Element,
+    target: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+) -> ModelCompositionEntry | None:
+    size = _linked_model_size(source, target, selection_index, group_index)
+    name = _composition_name(source.attrib.get("name") or target.attrib.get("name") or "")
+    if not name:
+        return None
+    return ModelCompositionEntry(
+        key=_component_key(name, target.attrib or source.attrib, size.min_models if size else None, size.max_models if size else None),
+        name=name,
+        min_models=size.min_models if size else None,
+        max_models=size.max_models if size else None,
+        wargear_options=_merge_wargear_option_lists(
+            _collect_wargear_options(source, selection_index, profile_index),
+            _collect_wargear_options(target, selection_index, profile_index),
+        ),
+        display_in_composition=False,
+    )
+
+
+def _unit_composition_choice_components(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+) -> list[ModelCompositionEntry]:
+    components: list[ModelCompositionEntry] = []
+    for child in _direct_selection_children(entry):
+        target = _resolve_selection_reference(child, selection_index, group_index)
+        if _local_name(target.tag) != "selectionEntry":
+            continue
+        if (target.attrib.get("type") or "").lower().strip() != "model":
+            continue
+        component = _component_from_linked_model(child, target, selection_index, group_index, profile_index)
+        if component is not None:
+            components.append(component)
+    return components
+
+
+def _unit_composition_group_components(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+) -> list[ModelCompositionEntry]:
+    options: list[str] = []
+    model_components: dict[str, dict[str, Any]] = {}
+
+    for child in _direct_selection_children(entry):
+        label = _clean_text(child.attrib.get("name"))
+        components = _unit_composition_choice_components(child, selection_index, group_index, profile_index)
+        if not label or not components:
+            continue
+        options.append(label)
+
+        seen_in_choice: set[str] = set()
+        for component in components:
+            key = component.name.lower()
+            seen_in_choice.add(key)
+            record = model_components.setdefault(
+                key,
+                {
+                    "name": component.name,
+                    "mins": [],
+                    "maxes": [],
+                    "present": 0,
+                    "wargear_options": [],
+                },
+            )
+            record["mins"].append(component.min_models)
+            record["maxes"].append(component.max_models)
+            record["wargear_options"] = _merge_wargear_option_lists(
+                record["wargear_options"],
+                component.wargear_options,
+            )
+
+        for key in seen_in_choice:
+            model_components[key]["present"] += 1
+
+    if not options:
+        return []
+
+    components = [
+        ModelCompositionEntry(
+            key=_component_key("Unit Composition", entry.attrib, None, None),
+            name="Unit Composition",
+            composition_options=options,
+        )
+    ]
+
+    choice_count = len(options)
+    for record in model_components.values():
+        min_values = [value for value in record["mins"] if value is not None]
+        max_values = [value for value in record["maxes"] if value is not None]
+        min_models = min(min_values) if min_values else None
+        if record["present"] < choice_count and min_models is not None:
+            min_models = 0
+        max_models = None if len(max_values) != len(record["maxes"]) else max(max_values) if max_values else None
+        components.append(
+            ModelCompositionEntry(
+                key=_component_key(record["name"], entry.attrib, min_models, max_models),
+                name=record["name"],
+                min_models=min_models,
+                max_models=max_models,
+                wargear_options=record["wargear_options"],
+                display_in_composition=False,
+            )
+        )
+
+    return components
+
+
 def _collect_component_wargear_from_children(
     entry: ET.Element,
     selection_index: dict[str, ET.Element],
@@ -708,6 +895,11 @@ def _component_from_group(
     group_index: dict[str, ET.Element],
     profile_index: dict[str, ET.Element],
 ) -> list[ModelCompositionEntry]:
+    if _is_unit_composition_group(entry):
+        unit_composition_components = _unit_composition_group_components(entry, selection_index, group_index, profile_index)
+        if unit_composition_components:
+            return unit_composition_components
+
     size = _component_size(entry, selection_index, group_index)
     if size is None:
         return []
@@ -810,6 +1002,8 @@ def _model_composition_json(components: list[ModelCompositionEntry]) -> str:
                 {"key": option.key, "name": option.name, "kind": option.kind, "stats": option.stats}
                 for option in component.wargear_options
             ],
+            "composition_options": component.composition_options,
+            "display_in_composition": component.display_in_composition,
         }
         for component in components
     ]

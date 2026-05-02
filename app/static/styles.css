@@ -235,10 +235,47 @@ input:disabled.locked-number {
 .composition-row strong {
   font-size: 0.82rem;
 }
+.composition-choice-row {
+  gap: 8px;
+}
+.composition-choice-list {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+.composition-choice-separator {
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+.composition-row-collapsible {
+  display: block;
+}
+.composition-row-collapsible summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+.composition-row-collapsible summary::-webkit-details-marker {
+  display: none;
+}
+.composition-row-collapsible summary::after {
+  content: ">";
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.composition-row-collapsible[open] summary::after {
+  content: "^";
+}
 .composition-row small {
+  display: block;
   color: var(--muted);
   line-height: 1.35;
   overflow-wrap: anywhere;
+  margin-top: 3px;
 }
 .inventory-composition {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

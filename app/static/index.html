@@ -55,7 +55,7 @@
         <p class="hint">Use this for boxed sets, objective markers, kitbash projects, terrain, or items not found in BSData.</p>
         <form id="custom-form" class="stacked-form">
           <label>Item name <input name="unit_name" required placeholder="Combat Patrol, spare Nob, terrain..."></label>
-          <label>Faction / army / team <input name="faction" placeholder="Optional"></label>
+          <label>Faction / army / team <input name="faction" list="inventory-faction-options" placeholder="Optional"></label>
           <div class="form-row three">
             <label>Quantity <input name="quantity" type="number" min="0" value="1"></label>
             <label>Models <input name="models_owned" type="number" min="0" value="1"></label>
@@ -107,6 +107,7 @@
             <tr><td colspan="7" class="empty-cell">No inventory yet.</td></tr>
           </tbody>
         </table>
+        <datalist id="inventory-faction-options"></datalist>
       </div>
       <div id="inventory-summary" class="inventory-summary" aria-live="polite"></div>
     </section>

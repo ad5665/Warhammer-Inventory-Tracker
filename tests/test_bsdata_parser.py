@@ -271,6 +271,99 @@ def test_parse_catalogue_file_reads_model_composition_and_model_wargear(tmp_path
     }
 
 
+def test_parse_catalogue_file_reads_unit_composition_choices(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Xenos - Orks">
+      <selectionEntries>
+        <selectionEntry id="gretchin-unit" name="Gretchin" type="unit">
+          <selectionEntryGroups>
+            <selectionEntryGroup id="unit-composition" name="Unit Composition">
+              <selectionEntries>
+                <selectionEntry id="small-mob" name="1 Runtherd and 10 Gretchin" type="upgrade">
+                  <entryLinks>
+                    <entryLink id="small-gretchin" name="Gretchin" type="selectionEntry" targetId="gretchin-model">
+                      <constraints>
+                        <constraint type="min" value="10" field="selections" scope="parent" />
+                        <constraint type="max" value="10" field="selections" scope="parent" />
+                      </constraints>
+                    </entryLink>
+                    <entryLink id="small-runtherd" name="Runtherd" type="selectionEntry" targetId="runtherd-model">
+                      <constraints>
+                        <constraint type="min" value="1" field="selections" scope="parent" />
+                        <constraint type="max" value="1" field="selections" scope="parent" />
+                      </constraints>
+                    </entryLink>
+                  </entryLinks>
+                </selectionEntry>
+                <selectionEntry id="large-mob" name="2 Runtherds and 20 Gretchin" type="upgrade">
+                  <entryLinks>
+                    <entryLink id="large-gretchin" name="Gretchin" type="selectionEntry" targetId="gretchin-model">
+                      <constraints>
+                        <constraint type="min" value="20" field="selections" scope="parent" />
+                        <constraint type="max" value="20" field="selections" scope="parent" />
+                      </constraints>
+                    </entryLink>
+                    <entryLink id="large-runtherd" name="Runtherd" type="selectionEntry" targetId="runtherd-model">
+                      <constraints>
+                        <constraint type="min" value="2" field="selections" scope="parent" />
+                        <constraint type="max" value="2" field="selections" scope="parent" />
+                      </constraints>
+                    </entryLink>
+                  </entryLinks>
+                </selectionEntry>
+              </selectionEntries>
+              <constraints>
+                <constraint type="min" value="1" field="selections" scope="parent" />
+                <constraint type="max" value="1" field="selections" scope="parent" />
+              </constraints>
+            </selectionEntryGroup>
+          </selectionEntryGroups>
+        </selectionEntry>
+      </selectionEntries>
+      <sharedSelectionEntries>
+        <selectionEntry id="gretchin-model" name="Gretchin" type="model">
+          <profiles>
+            <profile name="Grot blasta" typeName="Ranged Weapons">
+              <characteristics><characteristic name="Range">12&quot;</characteristic></characteristics>
+            </profile>
+          </profiles>
+        </selectionEntry>
+        <selectionEntry id="runtherd-model" name="Runtherd" type="model">
+          <profiles>
+            <profile name="Grot-smacka" typeName="Melee Weapons">
+              <characteristics><characteristic name="A">3</characteristic></characteristics>
+            </profile>
+          </profiles>
+        </selectionEntry>
+      </sharedSelectionEntries>
+    </catalogue>
+    '''
+    path = tmp_path / "Orks.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    units = parse_catalogue_file(path)
+
+    unit = next(unit for unit in units if unit.name == "Gretchin")
+    assert unit.min_models == 11
+    assert unit.max_models == 22
+    visible = [component for component in unit.model_composition if component.display_in_composition]
+    assert len(visible) == 1
+    assert visible[0].name == "Unit Composition"
+    assert visible[0].composition_options == [
+        "1 Runtherd and 10 Gretchin",
+        "2 Runtherds and 20 Gretchin",
+    ]
+    by_name = {component.name: component for component in unit.model_composition}
+    assert by_name["Gretchin"].min_models == 10
+    assert by_name["Gretchin"].max_models == 20
+    assert not by_name["Gretchin"].display_in_composition
+    assert {option.name for option in by_name["Gretchin"].wargear_options} == {"Grot blasta"}
+    assert by_name["Runtherd"].min_models == 1
+    assert by_name["Runtherd"].max_models == 2
+    assert not by_name["Runtherd"].display_in_composition
+    assert {option.name for option in by_name["Runtherd"].wargear_options} == {"Grot-smacka"}
+
+
 def test_parse_catalogue_file_prefixes_kill_team_ids(tmp_path: Path):
     sample = '''<?xml version="1.0" encoding="UTF-8"?>
     <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="2024 - Legionaries">

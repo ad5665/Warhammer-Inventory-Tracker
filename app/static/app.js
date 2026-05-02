@@ -74,6 +74,17 @@ function toggleInventoryItemCollapse(itemId) {
   renderInventory();
 }
 
+function syncInventoryCompositionDetails(sourceDetail) {
+  const composition = sourceDetail.closest(".inventory-composition");
+  if (!composition) return;
+
+  composition.querySelectorAll(".composition-row-collapsible").forEach(detail => {
+    if (detail.open !== sourceDetail.open) {
+      detail.open = sourceDetail.open;
+    }
+  });
+}
+
 function toast(message, type = "ok") {
   const box = el("toast");
   box.textContent = message;
@@ -279,19 +290,44 @@ function wargearNames(options, limit = 8) {
 }
 
 function renderModelComposition(unit, options = {}) {
-  const components = unit.model_composition || [];
+  const components = (unit.model_composition || [])
+    .filter(component => component.display_in_composition !== false);
   if (!components.length) return "";
 
   const className = ["composition-list", options.className].filter(Boolean).join(" ");
   const wargearLimit = options.wargearLimit ?? 8;
+  const collapsibleWargear = Boolean(options.collapsibleWargear);
   return `
     <div class="${className}">
       ${components.map(component => {
         const count = componentCountText(component);
         const gear = wargearNames(component.wargear_options || [], wargearLimit);
+        const title = `${count ? `${esc(count)} ` : ""}${esc(component.name)}`;
+        const compositionOptions = component.composition_options || [];
+        if (compositionOptions.length) {
+          return `
+            <div class="composition-row composition-choice-row">
+              <strong>${esc(component.name).toUpperCase()}</strong>
+              <div class="composition-choice-list">
+                ${compositionOptions.map((option, index) => `
+                  ${index ? '<span class="composition-choice-separator">OR</span>' : ""}
+                  <span>${esc(option)}</span>
+                `).join("")}
+              </div>
+            </div>
+          `;
+        }
+        if (collapsibleWargear && gear) {
+          return `
+            <details class="composition-row composition-row-collapsible">
+              <summary><strong>${title}</strong></summary>
+              <small>${esc(gear)}</small>
+            </details>
+          `;
+        }
         return `
           <div class="composition-row">
-            <strong>${count ? `${esc(count)} ` : ""}${esc(component.name)}</strong>
+            <strong>${title}</strong>
             ${gear ? `<small>${esc(gear)}</small>` : ""}
           </div>
         `;
@@ -362,7 +398,8 @@ function numberInput(item, field, width = 76) {
 }
 
 function textInput(item, field, placeholder = "") {
-  return `<input data-field="${field}" value="${esc(item[field] || "")}" placeholder="${esc(placeholder)}">`;
+  const list = field === "faction" ? ' list="inventory-faction-options"' : "";
+  return `<input data-field="${field}"${list} value="${esc(item[field] || "")}" placeholder="${esc(placeholder)}">`;
 }
 
 function textareaInput(item, field, rows = 2, placeholder = "") {
@@ -754,6 +791,28 @@ function renderInventorySummary() {
   `;
 }
 
+function inventoryFactionSuggestions() {
+  const byKey = new Map();
+  const add = (value) => {
+    const name = String(value || "").trim();
+    const key = name.toLowerCase();
+    if (name && !byKey.has(key)) byKey.set(key, name);
+  };
+
+  state.inventory.forEach(item => add(item.faction));
+  document.querySelectorAll('[data-field="faction"]').forEach(input => add(input.value));
+  return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b));
+}
+
+function renderInventoryFactionOptions() {
+  const list = el("inventory-faction-options");
+  if (!list) return;
+
+  list.innerHTML = inventoryFactionSuggestions()
+    .map(faction => `<option value="${esc(faction)}"></option>`)
+    .join("");
+}
+
 function renderCopyPhotos(item, copy) {
   const images = copy.images || [];
   const gallery = images.length ? `
@@ -843,6 +902,7 @@ function renderInventoryModelCompositionRow(item) {
   const composition = renderModelComposition(item, {
     className: "inventory-composition",
     wargearLimit: 24,
+    collapsibleWargear: true,
   });
   if (!composition) return "";
 
@@ -906,6 +966,7 @@ function renderInventory() {
   const body = el("inventory-body");
   if (!state.inventory.length) {
     body.innerHTML = '<tr><td colspan="7" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
+    renderInventoryFactionOptions();
     renderInventorySummary();
     return;
   }
@@ -920,6 +981,7 @@ function renderInventory() {
     const modelsOwned = itemModelCount(item);
     const unbuiltCount = Math.max(modelsOwned - Number(item.built_count || 0), 0);
     const unpaintedCount = Math.max(modelsOwned - Number(item.painted_count || 0), 0);
+    const customLabel = item.unit_id ? "" : " (custom)";
     return `
       <tr data-id="${item.id}" class="${[collapsed ? "inventory-row-collapsed" : "", detailRows ? "inventory-row-has-detail" : ""].filter(Boolean).join(" ")}">
         <td>
@@ -934,8 +996,7 @@ function renderInventory() {
               ${collapsed ? ">" : "^"}
             </button>
             <div>
-              <div class="row-title">${esc(item.unit_name)}</div>
-              <div class="row-sub">${item.unit_id ? "BSData linked" : "Custom item"}</div>
+              <div class="row-title">${esc(item.unit_name)}${customLabel}</div>
               ${points}${size}${inactive}
             </div>
           </div>
@@ -955,6 +1016,7 @@ function renderInventory() {
       ${detailRows}
     `;
   }).join("");
+  renderInventoryFactionOptions();
   renderInventorySummary();
 }
 
@@ -1002,6 +1064,8 @@ async function autosaveItem(itemId, payload, options = {}) {
     }
     if (options.rerender) {
       renderInventory();
+    } else {
+      renderInventoryFactionOptions();
     }
   } catch (error) {
     toast(`Autosave failed: ${error.message}`, "error");
@@ -1222,6 +1286,10 @@ function wireEvents() {
     if (!button) return;
     toggleInventoryItemCollapse(button.dataset.collapseToggle);
   });
+  el("inventory-body").addEventListener("toggle", (event) => {
+    if (!event.target.matches(".composition-row-collapsible")) return;
+    syncInventoryCompositionDetails(event.target);
+  }, true);
   el("inventory-body").addEventListener("input", (event) => {
     const target = event.target;
     const copyCard = target.closest("[data-copy-id]");

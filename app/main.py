@@ -800,6 +800,9 @@ def _decode_model_composition(raw: str | None) -> list[dict[str, Any]]:
         if not key or not name:
             continue
         options = _wargear_options_from_payload(component.get("wargear_options"))
+        composition_options = component.get("composition_options")
+        if not isinstance(composition_options, list):
+            composition_options = []
         components.append({
             "key": key,
             "name": name,
@@ -807,6 +810,12 @@ def _decode_model_composition(raw: str | None) -> list[dict[str, Any]]:
             "max_models": _safe_optional_int(component.get("max_models")),
             "wargear_options": options,
             "wargear_option_count": len(options),
+            "composition_options": [
+                _clean_optional(str(option or ""))
+                for option in composition_options
+                if _clean_optional(str(option or ""))
+            ],
+            "display_in_composition": component.get("display_in_composition") is not False,
         })
     return components
 
