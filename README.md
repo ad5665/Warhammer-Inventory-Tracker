@@ -19,6 +19,8 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 - Search imported catalogue entries and add them to your collection.
 - Add custom rows for boxed sets, kitbashes, terrain, spare models, bespoke Kill Team operatives, AoS projects, or anything not in BSData.
 - Track quantity, models owned, built count, painted count, build backlog, paint backlog, storage location, and notes.
+- Split each inventory row into per-quantity copy boxes for base number, wargear, photos, location, and copy notes.
+- Collapse inventory rows to hide copy boxes while keeping totals and backlog visible.
 - Track **wargear built on the model** from an imported weapon list, with per-weapon quantity controls.
 - Track **model number(s)**, for example a number written under a figure base.
 - Upload photos for each inventory row and mark each photo as built, painted, WIP, reference, or other.
@@ -28,6 +30,8 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 ## Screenshots
 
 ![Tracker overview](docs/screenshots/tracker-overview.png)
+
+![Inventory section with summary](docs/screenshots/inventory-section.png)
 
 ![Age of Sigmar catalogue tab](docs/screenshots/aos-catalogue.png)
 
@@ -124,13 +128,15 @@ Main endpoints:
 - `POST /api/inventory` - add inventory item
 - `PUT /api/inventory/{id}` - update inventory item
 - `DELETE /api/inventory/{id}` - delete inventory item and its local photos
+- `PUT /api/inventory/{id}/copies/{copy_id}` - update one per-quantity copy box
 - `POST /api/inventory/{id}/images` - upload a JPG, PNG, WebP, or GIF photo
+- `POST /api/inventory/{id}/copies/{copy_id}/images` - upload a photo to one per-quantity copy
 - `DELETE /api/images/{image_id}` - delete a photo
 - `GET /api/export.csv?game_system=wh40k_10e` - export the selected tab as CSV
 
 ## Data model notes
 
-`bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles discovered in the `.cat` XML. `inventory_items` contains your own collection, also scoped by `game_system`, including `wargear_selections_json` for the quantities you picked in the UI. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
+`bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles discovered in the `.cat` XML. `inventory_items` contains your own collection, also scoped by `game_system`. `inventory_copies` stores one child record per inventory quantity, including per-copy base number, wargear selections, location, notes, and photos. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
 
 Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`, or `/app/data/uploads/inventory/{inventory_item_id}/` in Docker. They are served locally by the app under `/uploads/...` and are not sent anywhere.
 
@@ -141,6 +147,7 @@ The app performs lightweight SQLite migrations on startup:
 - Adds `game_system` columns so existing 40k inventory remains under `wh40k_10e`.
 - Adds `wargear`, `wargear_selections_json`, and `model_number` columns.
 - Adds the `inventory_images` table for local photo uploads.
+- Adds `inventory_copies` and links uploaded images to the relevant per-quantity copy when available.
 
 Keep a copy of `data/stock_tracker.db` before upgrading if you want an easy rollback.
 

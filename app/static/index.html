@@ -43,7 +43,7 @@
         <div class="form-row">
           <label>
             Search catalogue
-            <input id="unit-query" type="search" placeholder="Boyz, Intercessors, Chaos Lord...">
+            <input id="unit-query" type="search" autocomplete="off" placeholder="Boyz, Intercessors, Chaos Lord...">
           </label>
           <label>
             Faction / army / team
@@ -87,7 +87,18 @@
         <a id="export-link" class="button-link" href="/api/export.csv?game_system=wh40k_10e">Export CSV</a>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="inventory-table">
+          <colgroup>
+            <col class="col-unit">
+            <col class="col-faction">
+            <col class="col-number">
+            <col class="col-number">
+            <col class="col-number">
+            <col class="col-number">
+            <col class="col-backlog">
+            <col class="col-copies">
+            <col class="col-actions">
+          </colgroup>
           <thead>
             <tr>
               <th>Unit / item</th>
@@ -97,19 +108,16 @@
               <th>Built</th>
               <th>Painted</th>
               <th>Backlog</th>
-              <th>Model #</th>
-              <th>Wargear built with</th>
-              <th>Location</th>
-              <th>Photos</th>
-              <th>Notes</th>
+              <th>Quantity boxes</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody id="inventory-body">
-            <tr><td colspan="13" class="empty-cell">No inventory yet.</td></tr>
+            <tr><td colspan="9" class="empty-cell">No inventory yet.</td></tr>
           </tbody>
         </table>
       </div>
+      <div id="inventory-summary" class="inventory-summary" aria-live="polite"></div>
     </section>
   </main>
 

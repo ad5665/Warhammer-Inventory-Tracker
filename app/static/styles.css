@@ -221,8 +221,18 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1920px;
+  min-width: 1220px;
 }
+.inventory-table {
+  table-layout: fixed;
+  min-width: 1500px;
+}
+.inventory-table .col-unit { width: 230px; }
+.inventory-table .col-faction { width: 180px; }
+.inventory-table .col-number { width: 95px; }
+.inventory-table .col-backlog { width: 120px; }
+.inventory-table .col-copies { width: 620px; }
+.inventory-table .col-actions { width: 130px; }
 th, td {
   text-align: left;
   border-bottom: 1px solid var(--border);
@@ -241,10 +251,170 @@ th {
 }
 td input, td textarea, td select { min-width: 80px; padding: 8px; border-radius: 9px; }
 td textarea { min-width: 220px; }
-.row-title { font-weight: 800; }
+.row-title {
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
 .row-sub { color: var(--muted); font-size: 0.78rem; margin-top: 3px; }
+.row-heading {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+.row-heading > div {
+  min-width: 0;
+}
 .backlog { color: var(--accent); font-weight: 800; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.collapse-toggle {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--text);
+  box-shadow: none;
+  font-size: 0.82rem;
+  line-height: 1;
+}
+
+.copy-cell {
+  min-width: 520px;
+}
+.inventory-row-collapsed .copy-cell {
+  min-width: 240px;
+}
+.collapsed-copy-summary {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: #0f1620;
+  color: var(--muted);
+  box-shadow: none;
+  font-size: 0.82rem;
+}
+.copy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+.copy-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0f1620;
+}
+.copy-card label {
+  font-size: 0.78rem;
+}
+.copy-card input,
+.copy-card textarea,
+.copy-card select {
+  min-width: 0;
+}
+.copy-card textarea {
+  min-width: 0;
+}
+.copy-header {
+  display: flex;
+  align-items: baseline;
+}
+.copy-header strong {
+  font-size: 0.92rem;
+}
+.copy-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.copy-wargear,
+.copy-photos {
+  display: grid;
+  gap: 8px;
+}
+.copy-wargear-picker {
+  display: grid;
+  gap: 8px;
+  max-height: 245px;
+  overflow: auto;
+  padding-right: 4px;
+}
+.copy-wargear-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #101821;
+}
+
+.inventory-summary {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.summary-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: end;
+}
+.summary-header h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.summary-header p {
+  margin: 0;
+  max-width: 520px;
+  font-size: 0.82rem;
+  text-align: right;
+}
+.summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 12px 18px;
+}
+.summary-metric {
+  display: grid;
+  gap: 3px;
+}
+.summary-metric span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.summary-metric strong {
+  font-size: 1.08rem;
+}
+.summary-table-wrap {
+  overflow-x: auto;
+}
+.summary-table {
+  min-width: 860px;
+}
+.summary-table th,
+.summary-table td {
+  padding: 8px 10px;
+}
+.summary-table tfoot td {
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+  font-weight: 800;
+}
 
 .photo-cell {
   display: grid;
@@ -327,6 +497,10 @@ td textarea { min-width: 220px; }
   .sync-panel, .section-heading { align-items: stretch; }
   .game-tabs { width: 100%; }
   .game-tabs .tab { flex: 1; }
+  .summary-header { display: grid; align-items: start; }
+  .summary-header p { text-align: left; }
+  .summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .copy-form-grid { grid-template-columns: 1fr; }
 }
 
 .wargear-cell {

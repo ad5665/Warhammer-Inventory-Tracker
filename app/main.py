@@ -58,6 +58,14 @@ class InventoryPayload(BaseModel):
     acquired_on: str | None = None
 
 
+class InventoryCopyPayload(BaseModel):
+    model_number: str | None = None
+    wargear: str | None = None
+    wargear_selections: dict[str, int] | None = None
+    storage_location: str | None = None
+    notes: str | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -227,6 +235,107 @@ def _delete_image_file(inventory_item_id: int, file_name: str) -> None:
         pass
 
 
+def _copy_payload_data(payload: InventoryCopyPayload, wargear_options: list[dict[str, Any]]) -> dict[str, Any]:
+    data = payload.model_dump()
+    data["model_number"] = _clean_optional(data.get("model_number"))
+    data["storage_location"] = _clean_optional(data.get("storage_location"))
+    data["wargear"] = _clean_textarea(data.get("wargear"))
+    data["notes"] = _clean_textarea(data.get("notes"))
+    data["wargear_selections"] = _clean_wargear_selections(data.get("wargear_selections"))
+    data["wargear_selections_json"] = json.dumps(data["wargear_selections"], sort_keys=True) if data["wargear_selections"] else None
+
+    if data["wargear_selections"]:
+        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options)
+
+    return data
+
+
+def _inventory_copy_dict(row: Any) -> dict[str, Any]:
+    copy = dict(row)
+    copy["wargear_selections"] = _decode_wargear_selections(copy.pop("wargear_selections_json", None))
+    copy.setdefault("images", [])
+    return copy
+
+
+def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
+    if copy_number != 1:
+        return {
+            "model_number": None,
+            "wargear": None,
+            "wargear_selections_json": None,
+            "storage_location": None,
+            "notes": None,
+        }
+
+    return {
+        "model_number": item["model_number"],
+        "wargear": item["wargear"],
+        "wargear_selections_json": item["wargear_selections_json"],
+        "storage_location": item["storage_location"],
+        "notes": item["notes"],
+    }
+
+
+def _ensure_inventory_copies(conn: Any, item: Any) -> None:
+    item_id = int(item["id"])
+    quantity = max(int(item["quantity"] or 0), 0)
+    existing_rows = conn.execute(
+        "SELECT copy_number FROM inventory_copies WHERE inventory_item_id = ?",
+        (item_id,),
+    ).fetchall()
+    existing_numbers = {int(row["copy_number"]) for row in existing_rows}
+    now = utc_now_sql()
+
+    for copy_number in range(1, quantity + 1):
+        if copy_number in existing_numbers:
+            continue
+        seed = _copy_seed_from_item(item, copy_number if existing_numbers else copy_number)
+        conn.execute(
+            """
+            INSERT INTO inventory_copies (
+                inventory_item_id, copy_number, model_number, wargear,
+                wargear_selections_json, storage_location, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                copy_number,
+                seed["model_number"],
+                seed["wargear"],
+                seed["wargear_selections_json"],
+                seed["storage_location"],
+                seed["notes"],
+                now,
+                now,
+            ),
+        )
+
+    if quantity > 0:
+        first_copy = conn.execute(
+            """
+            SELECT id FROM inventory_copies
+            WHERE inventory_item_id = ? AND copy_number = 1
+            """,
+            (item_id,),
+        ).fetchone()
+        if first_copy is not None:
+            conn.execute(
+                """
+                UPDATE inventory_images
+                SET inventory_copy_id = ?
+                WHERE inventory_item_id = ? AND inventory_copy_id IS NULL
+                """,
+                (first_copy["id"], item_id),
+            )
+
+
+def _trim_inventory_copies(conn: Any, item_id: int, quantity: int) -> list[Any]:
+    # Keep out-of-range copy details so accidental quantity reductions do not
+    # destroy per-copy notes/photos. The list response only exposes copies up
+    # to the current quantity, and raising quantity later reveals them again.
+    return []
+
+
 def _inventory_dict(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["unbuilt_count"] = max(int(item.get("models_owned") or 0) - int(item.get("built_count") or 0), 0)
@@ -237,9 +346,38 @@ def _inventory_dict(row: Any) -> dict[str, Any]:
     return item
 
 
+def _attach_copies(conn: Any, items: list[dict[str, Any]]) -> None:
+    for item in items:
+        item["copies"] = []
+    if not items:
+        return
+
+    ids = [int(item["id"]) for item in items]
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT c.*
+        FROM inventory_copies c
+        JOIN inventory_items i ON i.id = c.inventory_item_id
+        WHERE c.inventory_item_id IN ({placeholders})
+          AND c.copy_number <= i.quantity
+        ORDER BY c.inventory_item_id, c.copy_number
+        """,
+        ids,
+    ).fetchall()
+    by_item = {int(item["id"]): item for item in items}
+    for row in rows:
+        copy = _inventory_copy_dict(row)
+        parent = by_item.get(int(copy["inventory_item_id"]))
+        if parent is not None:
+            parent["copies"].append(copy)
+
+
 def _attach_images(conn: Any, items: list[dict[str, Any]]) -> None:
     for item in items:
         item["images"] = []
+        for copy in item.get("copies", []):
+            copy["images"] = []
     if not items:
         return
 
@@ -254,11 +392,20 @@ def _attach_images(conn: Any, items: list[dict[str, Any]]) -> None:
         ids,
     ).fetchall()
     by_item = {int(item["id"]): item for item in items}
+    by_copy = {
+        int(copy["id"]): copy
+        for item in items
+        for copy in item.get("copies", [])
+    }
     for row in rows:
         image = _image_dict(row)
-        parent = by_item.get(int(image["inventory_item_id"]))
-        if parent is not None:
-            parent["images"].append(image)
+        copy_id = image.get("inventory_copy_id")
+        if copy_id is not None and int(copy_id) in by_copy:
+            by_copy[int(copy_id)]["images"].append(image)
+        else:
+            parent = by_item.get(int(image["inventory_item_id"]))
+            if parent is not None:
+                parent["images"].append(image)
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -311,6 +458,52 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
         raise HTTPException(status_code=400, detail="unit_name is required for custom inventory items.")
 
     return data
+
+
+def _inventory_item_response(conn: Any, item_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            i.*,
+            u.points AS current_points,
+            u.keywords AS current_keywords,
+            u.stats_json AS current_stats_json,
+            u.wargear_options_json AS current_wargear_options_json,
+            u.active AS unit_active
+        FROM inventory_items i
+        LEFT JOIN bsd_units u ON u.id = i.unit_id
+        WHERE i.id = ?
+        """,
+        (item_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inventory item not found.")
+
+    _ensure_inventory_copies(conn, row)
+    item = _inventory_dict(row)
+    stats_json = item.pop("current_stats_json", None)
+    try:
+        item["current_stats"] = json.loads(stats_json) if stats_json else {}
+    except json.JSONDecodeError:
+        item["current_stats"] = {}
+    _attach_copies(conn, [item])
+    _attach_images(conn, [item])
+    return item
+
+
+def _item_wargear_options(conn: Any, item_id: int) -> list[dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT u.wargear_options_json
+        FROM inventory_items i
+        LEFT JOIN bsd_units u ON u.id = i.unit_id
+        WHERE i.id = ?
+        """,
+        (item_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Inventory item not found.")
+    return _decode_wargear_options(row["wargear_options_json"])
 
 
 def _safe_image_role(image_role: str | None) -> str:
@@ -552,6 +745,7 @@ def inventory(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dic
         ).fetchall()
         output: list[dict[str, Any]] = []
         for row in rows:
+            _ensure_inventory_copies(conn, row)
             item = _inventory_dict(row)
             stats_json = item.pop("current_stats_json", None)
             try:
@@ -559,6 +753,7 @@ def inventory(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dic
             except json.JSONDecodeError:
                 item["current_stats"] = {}
             output.append(item)
+        _attach_copies(conn, output)
         _attach_images(conn, output)
         return output
 
@@ -598,14 +793,14 @@ def create_inventory_item(payload: InventoryPayload) -> dict[str, Any]:
         )
         item_id = cursor.lastrowid
         row = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
-        item = _inventory_dict(row)
-        item["images"] = []
-        return item
+        _ensure_inventory_copies(conn, row)
+        return _inventory_item_response(conn, item_id)
 
 
 @app.put("/api/inventory/{item_id}")
 def update_inventory_item(item_id: int, payload: InventoryPayload) -> dict[str, Any]:
     now = utc_now_sql()
+    image_rows_to_delete: list[Any] = []
     with connect() as conn:
         existing = conn.execute("SELECT id FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
         if existing is None:
@@ -653,10 +848,60 @@ def update_inventory_item(item_id: int, payload: InventoryPayload) -> dict[str, 
                 item_id,
             ),
         )
+        image_rows_to_delete = _trim_inventory_copies(conn, item_id, data["quantity"])
         row = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
-        item = _inventory_dict(row)
-        _attach_images(conn, [item])
-        return item
+        _ensure_inventory_copies(conn, row)
+        item = _inventory_item_response(conn, item_id)
+
+    for row in image_rows_to_delete:
+        _delete_image_file(int(row["inventory_item_id"]), row["file_name"])
+    return item
+
+
+@app.put("/api/inventory/{item_id}/copies/{copy_id}")
+def update_inventory_copy(item_id: int, copy_id: int, payload: InventoryCopyPayload) -> dict[str, Any]:
+    now = utc_now_sql()
+    with connect() as conn:
+        copy_row = conn.execute(
+            """
+            SELECT c.*
+            FROM inventory_copies c
+            JOIN inventory_items i ON i.id = c.inventory_item_id
+            WHERE c.id = ? AND c.inventory_item_id = ?
+            """,
+            (copy_id, item_id),
+        ).fetchone()
+        if copy_row is None:
+            raise HTTPException(status_code=404, detail="Inventory copy not found.")
+
+        data = _copy_payload_data(payload, _item_wargear_options(conn, item_id))
+        conn.execute(
+            """
+            UPDATE inventory_copies SET
+                model_number = ?,
+                wargear = ?,
+                wargear_selections_json = ?,
+                storage_location = ?,
+                notes = ?,
+                updated_at = ?
+            WHERE id = ? AND inventory_item_id = ?
+            """,
+            (
+                data["model_number"],
+                data["wargear"],
+                data["wargear_selections_json"],
+                data["storage_location"],
+                data["notes"],
+                now,
+                copy_id,
+                item_id,
+            ),
+        )
+        row = conn.execute("SELECT * FROM inventory_copies WHERE id = ?", (copy_id,)).fetchone()
+        copy = _inventory_copy_dict(row)
+        parent = {"id": item_id, "copies": [copy], "images": []}
+        _attach_images(conn, [parent])
+        return copy
 
 
 @app.delete("/api/inventory/{item_id}", status_code=204)
@@ -675,17 +920,24 @@ def delete_inventory_item(item_id: int) -> Response:
     return Response(status_code=204)
 
 
-@app.post("/api/inventory/{item_id}/images", status_code=201)
-async def upload_inventory_image(
+async def _store_inventory_image(
     item_id: int,
-    image: UploadFile = File(...),
-    image_role: str = Form(default="other"),
-    caption: str | None = Form(default=None),
+    image: UploadFile,
+    image_role: str,
+    caption: str | None = None,
+    copy_id: int | None = None,
 ) -> dict[str, Any]:
     with connect() as conn:
         item = conn.execute("SELECT id FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
         if item is None:
             raise HTTPException(status_code=404, detail="Inventory item not found.")
+        if copy_id is not None:
+            copy = conn.execute(
+                "SELECT id FROM inventory_copies WHERE id = ? AND inventory_item_id = ?",
+                (copy_id, item_id),
+            ).fetchone()
+            if copy is None:
+                raise HTTPException(status_code=404, detail="Inventory copy not found.")
 
     ext = _safe_image_ext(image)
     content = await image.read(MAX_IMAGE_BYTES + 1)
@@ -706,12 +958,13 @@ async def upload_inventory_image(
             cursor = conn.execute(
                 """
                 INSERT INTO inventory_images (
-                    inventory_item_id, file_name, original_name, content_type,
+                    inventory_item_id, inventory_copy_id, file_name, original_name, content_type,
                     image_role, caption, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item_id,
+                    copy_id,
                     file_name,
                     _original_name(image.filename),
                     (image.content_type or "").split(";", 1)[0].lower() or None,
@@ -725,6 +978,27 @@ async def upload_inventory_image(
     except Exception:
         _delete_image_file(item_id, file_name)
         raise
+
+
+@app.post("/api/inventory/{item_id}/images", status_code=201)
+async def upload_inventory_image(
+    item_id: int,
+    image: UploadFile = File(...),
+    image_role: str = Form(default="other"),
+    caption: str | None = Form(default=None),
+) -> dict[str, Any]:
+    return await _store_inventory_image(item_id, image, image_role, caption)
+
+
+@app.post("/api/inventory/{item_id}/copies/{copy_id}/images", status_code=201)
+async def upload_inventory_copy_image(
+    item_id: int,
+    copy_id: int,
+    image: UploadFile = File(...),
+    image_role: str = Form(default="other"),
+    caption: str | None = Form(default=None),
+) -> dict[str, Any]:
+    return await _store_inventory_image(item_id, image, image_role, caption, copy_id)
 
 
 @app.delete("/api/images/{image_id}", status_code=204)

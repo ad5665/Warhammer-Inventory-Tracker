@@ -5,9 +5,11 @@ const state = {
   gameSystems: [],
   currentGame: localStorage.getItem("warhammer-stock-current-game") || DEFAULT_GAME,
   lastUnitQuery: "",
+  collapsedInventoryItems: new Set(),
 };
 
 const autosaveTimers = new Map();
+const copyAutosaveTimers = new Map();
 
 const fallbackSystems = [
   { id: "wh40k_10e", label: "Warhammer 40,000 10th Edition", short_label: "40k", catalogue_word: "units/models" },
@@ -28,6 +30,47 @@ function esc(value) {
 
 function jsArg(value) {
   return JSON.stringify(String(value ?? ""));
+}
+
+function collapsedInventoryKey() {
+  return `warhammer-stock-collapsed-inventory-${state.currentGame}`;
+}
+
+function loadCollapsedInventoryItems() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(collapsedInventoryKey()) || "[]");
+    state.collapsedInventoryItems = new Set(
+      Array.isArray(parsed)
+        ? parsed.map(Number).filter(value => Number.isFinite(value) && value > 0)
+        : []
+    );
+  } catch (_) {
+    state.collapsedInventoryItems = new Set();
+  }
+}
+
+function saveCollapsedInventoryItems() {
+  localStorage.setItem(
+    collapsedInventoryKey(),
+    JSON.stringify(Array.from(state.collapsedInventoryItems).sort((a, b) => a - b))
+  );
+}
+
+function isInventoryItemCollapsed(itemId) {
+  return state.collapsedInventoryItems.has(Number(itemId));
+}
+
+function toggleInventoryItemCollapse(itemId) {
+  const id = Number(itemId);
+  if (!Number.isFinite(id) || id <= 0) return;
+
+  if (state.collapsedInventoryItems.has(id)) {
+    state.collapsedInventoryItems.delete(id);
+  } else {
+    state.collapsedInventoryItems.add(id);
+  }
+  saveCollapsedInventoryItems();
+  renderInventory();
 }
 
 function toast(message, type = "ok") {
@@ -288,7 +331,51 @@ function renderWargear(item) {
           `;
         }).join("")}
       </div>
-      <div class="row-sub">Set the number built with each weapon, then Save.</div>
+      <div class="row-sub">Set the number built with each weapon.</div>
+    </div>
+  `;
+}
+
+function copyTextInput(copy, field, placeholder = "") {
+  return `<input data-copy-field="${field}" value="${esc(copy[field] || "")}" placeholder="${esc(placeholder)}">`;
+}
+
+function copyTextareaInput(copy, field, rows = 2, placeholder = "") {
+  return `<textarea data-copy-field="${field}" rows="${rows}" placeholder="${esc(placeholder)}">${esc(copy[field] || "")}</textarea>`;
+}
+
+function renderCopyWargear(item, copy) {
+  const options = item.wargear_options || item.current_wargear_options || [];
+  const selections = copy.wargear_selections || {};
+
+  if (!options.length) {
+    return `
+      <div class="copy-wargear wargear-fallback">
+        ${copyTextareaInput(copy, "wargear", 2, "Weapons / specialist gear")}
+        <div class="row-sub">No BSData weapon list found for this row.</div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="copy-wargear">
+      <div class="copy-wargear-picker">
+        ${options.map(option => {
+          const value = Number(selections[option.key] || 0);
+          const stats = wargearStatSummary(option);
+          return `
+            <div class="copy-wargear-row">
+              <div class="wargear-name">
+                <span>${esc(option.name)}</span>
+                <small>${esc(option.kind || "Weapon")}${stats ? ` · ${esc(stats)}` : ""}</small>
+              </div>
+              <div class="qty-stepper" aria-label="${esc(option.name)} quantity">
+                <input data-copy-wargear-key="${esc(option.key)}" type="number" min="0" max="999" step="1" value="${value}">
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
     </div>
   `;
 }
@@ -297,6 +384,18 @@ function collectWargearSelections(row) {
   const selections = {};
   row.querySelectorAll("[data-wargear-key]").forEach(input => {
     const key = input.dataset.wargearKey;
+    const value = Math.max(0, Number(input.value || 0));
+    if (key && value > 0) {
+      selections[key] = value;
+    }
+  });
+  return selections;
+}
+
+function collectCopyWargearSelections(card) {
+  const selections = {};
+  card.querySelectorAll("[data-copy-wargear-key]").forEach(input => {
+    const key = input.dataset.copyWargearKey;
     const value = Math.max(0, Number(input.value || 0));
     if (key && value > 0) {
       selections[key] = value;
@@ -321,6 +420,260 @@ function updateRowBacklog(row) {
   const paintNode = row.querySelector('[data-backlog="paint"]');
   if (buildNode) buildNode.textContent = `${buildBacklog} build`;
   if (paintNode) paintNode.textContent = `${paintBacklog} paint`;
+}
+
+function inventorySummaryRecord(item) {
+  const row = document.querySelector(`tr[data-id="${item.id}"]`);
+  const field = (name) => row?.querySelector(`[data-field="${name}"]`)?.value ?? item[name] ?? "";
+  const numberField = (name) => {
+    const value = Number(field(name) || 0);
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  const quantity = numberField("quantity");
+  const modelsOwned = numberField("models_owned");
+  const builtCount = numberField("built_count");
+  const paintedCount = numberField("painted_count");
+  const points = Number(item.current_points ?? 0);
+
+  return {
+    faction: String(field("faction") || "").trim() || "Unassigned",
+    rows: 1,
+    quantity,
+    models: modelsOwned,
+    built: builtCount,
+    painted: paintedCount,
+    buildBacklog: Math.max(modelsOwned - builtCount, 0),
+    paintBacklog: Math.max(modelsOwned - paintedCount, 0),
+    points: Number.isFinite(points) ? points * quantity : 0,
+  };
+}
+
+function blankSummaryRecord(faction = "") {
+  return {
+    faction,
+    rows: 0,
+    quantity: 0,
+    models: 0,
+    built: 0,
+    painted: 0,
+    buildBacklog: 0,
+    paintBacklog: 0,
+    points: 0,
+  };
+}
+
+function addSummaryRecord(target, record) {
+  target.rows += record.rows;
+  target.quantity += record.quantity;
+  target.models += record.models;
+  target.built += record.built;
+  target.painted += record.painted;
+  target.buildBacklog += record.buildBacklog;
+  target.paintBacklog += record.paintBacklog;
+  target.points += record.points;
+}
+
+function formatSummaryNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function formatSummaryPoints(value) {
+  const points = Number(value || 0);
+  return Number.isInteger(points) ? formatSummaryNumber(points) : points.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+function renderInventorySummary() {
+  const container = el("inventory-summary");
+  if (!container) return;
+  if (!state.inventory.length) {
+    container.innerHTML = "";
+    return;
+  }
+
+  const total = blankSummaryRecord("Total");
+  const factionRecords = new Map();
+
+  for (const item of state.inventory) {
+    const record = inventorySummaryRecord(item);
+    addSummaryRecord(total, record);
+
+    if (!factionRecords.has(record.faction)) {
+      factionRecords.set(record.faction, blankSummaryRecord(record.faction));
+    }
+    addSummaryRecord(factionRecords.get(record.faction), record);
+  }
+
+  const factions = Array.from(factionRecords.values())
+    .sort((a, b) => b.points - a.points || a.faction.localeCompare(b.faction));
+
+  const metric = (label, value) => `
+    <div class="summary-metric">
+      <span>${esc(label)}</span>
+      <strong>${esc(value)}</strong>
+    </div>
+  `;
+
+  container.innerHTML = `
+    <div class="summary-header">
+      <h3>Inventory summary</h3>
+      <p>Total points use the current catalogue point value for each row times quantity.</p>
+    </div>
+    <div class="summary-metrics">
+      ${metric("Total points", `${formatSummaryPoints(total.points)} pts`)}
+      ${metric("Rows", formatSummaryNumber(total.rows))}
+      ${metric("Quantity", formatSummaryNumber(total.quantity))}
+      ${metric("Models", formatSummaryNumber(total.models))}
+      ${metric("Built", formatSummaryNumber(total.built))}
+      ${metric("Painted", formatSummaryNumber(total.painted))}
+      ${metric("Build backlog", formatSummaryNumber(total.buildBacklog))}
+      ${metric("Paint backlog", formatSummaryNumber(total.paintBacklog))}
+    </div>
+    <div class="summary-table-wrap">
+      <table class="summary-table">
+        <thead>
+          <tr>
+            <th>Faction / army / team</th>
+            <th>Points</th>
+            <th>Rows</th>
+            <th>Qty</th>
+            <th>Models</th>
+            <th>Built</th>
+            <th>Painted</th>
+            <th>Build backlog</th>
+            <th>Paint backlog</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${factions.map(record => `
+            <tr>
+              <td>${esc(record.faction)}</td>
+              <td>${formatSummaryPoints(record.points)} pts</td>
+              <td>${formatSummaryNumber(record.rows)}</td>
+              <td>${formatSummaryNumber(record.quantity)}</td>
+              <td>${formatSummaryNumber(record.models)}</td>
+              <td>${formatSummaryNumber(record.built)}</td>
+              <td>${formatSummaryNumber(record.painted)}</td>
+              <td>${formatSummaryNumber(record.buildBacklog)}</td>
+              <td>${formatSummaryNumber(record.paintBacklog)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td>Total</td>
+            <td>${formatSummaryPoints(total.points)} pts</td>
+            <td>${formatSummaryNumber(total.rows)}</td>
+            <td>${formatSummaryNumber(total.quantity)}</td>
+            <td>${formatSummaryNumber(total.models)}</td>
+            <td>${formatSummaryNumber(total.built)}</td>
+            <td>${formatSummaryNumber(total.painted)}</td>
+            <td>${formatSummaryNumber(total.buildBacklog)}</td>
+            <td>${formatSummaryNumber(total.paintBacklog)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  `;
+}
+
+function renderCopyPhotos(item, copy) {
+  const images = copy.images || [];
+  const gallery = images.length ? `
+    <div class="thumb-grid">
+      ${images.map(image => `
+        <figure class="thumb">
+          <a href="${esc(image.url)}" target="_blank" rel="noopener">
+            <img src="${esc(image.url)}" alt="${esc(image.image_role || "model photo")}">
+          </a>
+          <figcaption>${esc(image.image_role || "photo")}</figcaption>
+          <button type="button" class="thumb-delete" onclick="deleteImage(${image.id})" title="Delete photo">×</button>
+        </figure>
+      `).join("")}
+    </div>
+  ` : '<div class="row-sub">No photos yet</div>';
+
+  return `
+    <div class="copy-photos">
+      ${gallery}
+      <div class="photo-upload">
+        <select data-copy-image-role="${copy.id}" title="Photo type">
+          <option value="built">Built</option>
+          <option value="painted">Painted</option>
+          <option value="wip">WIP</option>
+          <option value="reference">Reference</option>
+          <option value="other">Other</option>
+        </select>
+        <label class="file-button">
+          Upload
+          <input type="file" accept="image/*" onchange="uploadCopyImage(${item.id}, ${copy.id}, this)">
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function renderCopies(item) {
+  const copies = item.copies || [];
+  if (!copies.length) {
+    return '<div class="row-sub">Set Qty above 0 to add copy details.</div>';
+  }
+
+  const quantity = Number(item.quantity || copies.length);
+  return `
+    <div class="copy-grid">
+      ${copies.map(copy => `
+        <section class="copy-card" data-copy-id="${copy.id}">
+          <div class="copy-header">
+            <strong>Copy ${esc(copy.copy_number)}${quantity > 1 ? ` of ${esc(quantity)}` : ""}</strong>
+          </div>
+          <div class="copy-form-grid">
+            <label>
+              Base #
+              ${copyTextInput(copy, "model_number", "Base #")}
+            </label>
+            <label>
+              Location
+              ${copyTextInput(copy, "storage_location", "Shelf / case")}
+            </label>
+          </div>
+          <label>
+            Wargear built with
+            ${renderCopyWargear(item, copy)}
+          </label>
+          <label>
+            Photos
+            ${renderCopyPhotos(item, copy)}
+          </label>
+          <label>
+            Notes
+            ${copyTextareaInput(copy, "notes", 2, "Notes for this copy")}
+          </label>
+        </section>
+      `).join("")}
+    </div>
+  `;
+}
+
+function copyBoxLabel(item) {
+  const count = (item.copies || []).length || Number(item.quantity || 0);
+  return `${count} ${count === 1 ? "copy box" : "copy boxes"}`;
+}
+
+function renderCopyCell(item) {
+  if (isInventoryItemCollapsed(item.id)) {
+    return `
+      <button
+        type="button"
+        class="collapsed-copy-summary"
+        data-collapse-toggle="${item.id}"
+        aria-expanded="false"
+      >
+        ${esc(copyBoxLabel(item))} hidden
+      </button>
+    `;
+  }
+  return renderCopies(item);
 }
 
 function renderPhotos(item) {
@@ -362,19 +715,34 @@ function renderPhotos(item) {
 function renderInventory() {
   const body = el("inventory-body");
   if (!state.inventory.length) {
-    body.innerHTML = '<tr><td colspan="13" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
+    renderInventorySummary();
     return;
   }
 
   body.innerHTML = state.inventory.map(item => {
     const inactive = item.unit_id && item.unit_active === 0 ? '<div class="row-sub">Catalogue entry not active after latest import</div>' : '';
     const points = item.current_points !== null && item.current_points !== undefined ? `<div class="row-sub">${esc(item.current_points)} pts currently</div>` : "";
+    const collapsed = isInventoryItemCollapsed(item.id);
     return `
-      <tr data-id="${item.id}">
+      <tr data-id="${item.id}" class="${collapsed ? "inventory-row-collapsed" : ""}">
         <td>
-          <div class="row-title">${esc(item.unit_name)}</div>
-          <div class="row-sub">${item.unit_id ? "BSData linked" : "Custom item"}</div>
-          ${points}${inactive}
+          <div class="row-heading">
+            <button
+              type="button"
+              class="collapse-toggle"
+              data-collapse-toggle="${item.id}"
+              aria-expanded="${collapsed ? "false" : "true"}"
+              title="${collapsed ? "Expand item" : "Collapse item"}"
+            >
+              ${collapsed ? ">" : "^"}
+            </button>
+            <div>
+              <div class="row-title">${esc(item.unit_name)}</div>
+              <div class="row-sub">${item.unit_id ? "BSData linked" : "Custom item"}</div>
+              ${points}${inactive}
+            </div>
+          </div>
         </td>
         <td>${textInput(item, "faction", "Faction / army / team")}</td>
         <td>${numberInput(item, "quantity")}</td>
@@ -382,11 +750,7 @@ function renderInventory() {
         <td>${numberInput(item, "built_count")}</td>
         <td>${numberInput(item, "painted_count")}</td>
         <td><span class="backlog" data-backlog="build">${item.unbuilt_count} build</span><br><span class="backlog" data-backlog="paint">${item.unpainted_count} paint</span></td>
-        <td>${textInput(item, "model_number", "Base #")}</td>
-        <td>${renderWargear(item)}</td>
-        <td>${textInput(item, "storage_location", "Shelf / case")}</td>
-        <td>${renderPhotos(item)}</td>
-        <td>${textareaInput(item, "notes", 3, "Notes")}</td>
+        <td class="copy-cell">${renderCopyCell(item)}</td>
         <td>
           <div class="actions">
             <button class="secondary" onclick="cloneItem(${item.id})">Clone</button>
@@ -396,6 +760,7 @@ function renderInventory() {
       </tr>
     `;
   }).join("");
+  renderInventorySummary();
 }
 
 async function loadInventory() {
@@ -408,7 +773,7 @@ function collectItemPayload(itemId) {
   const row = document.querySelector(`tr[data-id="${itemId}"]`);
   if (!original || !row) throw new Error("Could not find item row.");
 
-  const field = (name) => row.querySelector(`[data-field="${name}"]`)?.value || "";
+  const field = (name) => row.querySelector(`[data-field="${name}"]`)?.value ?? original[name] ?? "";
   const numberField = (name) => Number(field(name) || 0);
 
   return {
@@ -421,27 +786,34 @@ function collectItemPayload(itemId) {
     models_owned: numberField("models_owned"),
     built_count: numberField("built_count"),
     painted_count: numberField("painted_count"),
-    wargear: field("wargear"),
-    wargear_selections: collectWargearSelections(row),
-    model_number: field("model_number"),
-    storage_location: field("storage_location"),
-    notes: field("notes"),
+    wargear: original.wargear,
+    wargear_selections: original.wargear_selections || {},
+    model_number: original.model_number,
+    storage_location: original.storage_location,
+    notes: original.notes,
     acquired_on: original.acquired_on,
   };
 }
 
-async function autosaveItem(itemId, payload) {
+async function autosaveItem(itemId, payload, options = {}) {
   try {
-    await api(`/api/inventory/${itemId}`, {
+    const saved = await api(`/api/inventory/${itemId}`, {
       method: "PUT",
       body: JSON.stringify(payload),
     });
+    const index = state.inventory.findIndex(item => item.id === itemId);
+    if (index >= 0) {
+      state.inventory[index] = saved;
+    }
+    if (options.rerender) {
+      renderInventory();
+    }
   } catch (error) {
     toast(`Autosave failed: ${error.message}`, "error");
   }
 }
 
-function scheduleAutosave(row) {
+function scheduleAutosave(row, options = {}) {
   const itemId = Number(row.dataset.id || 0);
   if (!itemId) return;
   let payload;
@@ -454,7 +826,57 @@ function scheduleAutosave(row) {
   clearTimeout(autosaveTimers.get(itemId));
   autosaveTimers.set(itemId, setTimeout(() => {
     autosaveTimers.delete(itemId);
-    autosaveItem(itemId, payload);
+    autosaveItem(itemId, payload, options);
+  }, 650));
+}
+
+function collectCopyPayload(copyId) {
+  const card = document.querySelector(`[data-copy-id="${copyId}"]`);
+  if (!card) throw new Error("Could not find copy box.");
+  const field = (name) => card.querySelector(`[data-copy-field="${name}"]`)?.value || "";
+  return {
+    model_number: field("model_number"),
+    wargear: field("wargear"),
+    wargear_selections: collectCopyWargearSelections(card),
+    storage_location: field("storage_location"),
+    notes: field("notes"),
+  };
+}
+
+async function autosaveCopy(itemId, copyId, payload) {
+  try {
+    const saved = await api(`/api/inventory/${itemId}/copies/${copyId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    const item = state.inventory.find(candidate => candidate.id === itemId);
+    if (item?.copies) {
+      const index = item.copies.findIndex(copy => copy.id === copyId);
+      if (index >= 0) item.copies[index] = saved;
+    }
+  } catch (error) {
+    toast(`Autosave failed: ${error.message}`, "error");
+  }
+}
+
+function scheduleCopyAutosave(card) {
+  const row = card.closest("tr[data-id]");
+  const itemId = Number(row?.dataset.id || 0);
+  const copyId = Number(card.dataset.copyId || 0);
+  if (!itemId || !copyId) return;
+
+  let payload;
+  try {
+    payload = collectCopyPayload(copyId);
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+
+  clearTimeout(copyAutosaveTimers.get(copyId));
+  copyAutosaveTimers.set(copyId, setTimeout(() => {
+    copyAutosaveTimers.delete(copyId);
+    autosaveCopy(itemId, copyId, payload);
   }, 650));
 }
 
@@ -506,6 +928,28 @@ async function uploadImage(itemId, input) {
   }
 }
 
+async function uploadCopyImage(itemId, copyId, input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const role = document.querySelector(`[data-copy-image-role="${copyId}"]`)?.value || "other";
+  const formData = new FormData();
+  formData.append("image", file);
+  formData.append("image_role", role);
+
+  try {
+    await api(`/api/inventory/${itemId}/copies/${copyId}/images`, {
+      method: "POST",
+      body: formData,
+    });
+    toast("Photo uploaded.");
+    await Promise.all([loadInventory(), loadStatus()]);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    input.value = "";
+  }
+}
+
 async function deleteImage(imageId) {
   if (!confirm("Delete this photo?")) return;
   try {
@@ -544,9 +988,15 @@ function customFormPayload(form) {
   return data;
 }
 
+function clearCatalogueSearch() {
+  el("unit-query").value = "";
+  state.lastUnitQuery = "";
+}
+
 async function refreshGameData() {
   renderTabs();
   updateGameCopy();
+  loadCollapsedInventoryItems();
   el("unit-results").innerHTML = '<div class="empty">Search after syncing this game system.</div>';
   await Promise.all([loadStatus(), loadFactions(), loadInventory()]);
   await searchUnits();
@@ -566,19 +1016,36 @@ async function setGameSystem(gameSystem) {
 function wireEvents() {
   el("sync-btn").addEventListener("click", syncBsdata);
   el("faction-filter").addEventListener("change", searchUnits);
+  el("inventory-body").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-collapse-toggle]");
+    if (!button) return;
+    toggleInventoryItemCollapse(button.dataset.collapseToggle);
+  });
   el("inventory-body").addEventListener("input", (event) => {
     const target = event.target;
+    const copyCard = target.closest("[data-copy-id]");
+    if (copyCard && (target.matches("[data-copy-field]") || target.matches("[data-copy-wargear-key]"))) {
+      scheduleCopyAutosave(copyCard);
+      return;
+    }
     const row = target.closest("tr[data-id]");
     if (!row || (!target.matches("[data-field]") && !target.matches("[data-wargear-key]"))) return;
     updateRowBacklog(row);
-    scheduleAutosave(row);
+    renderInventorySummary();
+    scheduleAutosave(row, { rerender: target.dataset.field === "quantity" });
   });
   el("inventory-body").addEventListener("change", (event) => {
     const target = event.target;
+    const copyCard = target.closest("[data-copy-id]");
+    if (copyCard && (target.matches("[data-copy-field]") || target.matches("[data-copy-wargear-key]"))) {
+      scheduleCopyAutosave(copyCard);
+      return;
+    }
     const row = target.closest("tr[data-id]");
     if (!row || (!target.matches("[data-field]") && !target.matches("[data-wargear-key]"))) return;
     updateRowBacklog(row);
-    scheduleAutosave(row);
+    renderInventorySummary();
+    scheduleAutosave(row, { rerender: target.dataset.field === "quantity" });
   });
   el("game-tabs").addEventListener("click", (event) => {
     const button = event.target.closest("[data-game]");
@@ -617,12 +1084,14 @@ window.addUnit = addUnit;
 window.cloneItem = cloneItem;
 window.deleteItem = deleteItem;
 window.uploadImage = uploadImage;
+window.uploadCopyImage = uploadCopyImage;
 window.deleteImage = deleteImage;
 
 // Load the app.
 document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
   try {
+    clearCatalogueSearch();
     await loadGameSystems();
     await refreshGameData();
   } catch (error) {

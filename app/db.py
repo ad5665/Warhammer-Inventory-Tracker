@@ -95,6 +95,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS inventory_images (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 inventory_item_id INTEGER NOT NULL,
+                inventory_copy_id INTEGER,
                 file_name TEXT NOT NULL,
                 original_name TEXT,
                 content_type TEXT,
@@ -102,6 +103,21 @@ def init_db() -> None:
                 caption TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(inventory_item_id) REFERENCES inventory_items(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS inventory_copies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inventory_item_id INTEGER NOT NULL,
+                copy_number INTEGER NOT NULL CHECK(copy_number >= 1),
+                model_number TEXT,
+                wargear TEXT,
+                wargear_selections_json TEXT,
+                storage_location TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(inventory_item_id) REFERENCES inventory_items(id) ON DELETE CASCADE,
+                UNIQUE(inventory_item_id, copy_number)
             );
 
             CREATE TABLE IF NOT EXISTS import_runs (
@@ -127,6 +143,7 @@ def init_db() -> None:
         _ensure_column(conn, "inventory_items", "wargear", "wargear TEXT")
         _ensure_column(conn, "inventory_items", "wargear_selections_json", "wargear_selections_json TEXT")
         _ensure_column(conn, "inventory_items", "model_number", "model_number TEXT")
+        _ensure_column(conn, "inventory_images", "inventory_copy_id", "inventory_copy_id INTEGER")
         _ensure_column(conn, "import_runs", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
 
         conn.executescript(
@@ -145,8 +162,15 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_inventory_model_number
                 ON inventory_items(game_system, model_number COLLATE NOCASE);
 
+            CREATE INDEX IF NOT EXISTS idx_inventory_copies_item
+                ON inventory_copies(inventory_item_id, copy_number);
+            CREATE INDEX IF NOT EXISTS idx_inventory_copies_model_number
+                ON inventory_copies(model_number COLLATE NOCASE);
+
             CREATE INDEX IF NOT EXISTS idx_inventory_images_item
                 ON inventory_images(inventory_item_id);
+            CREATE INDEX IF NOT EXISTS idx_inventory_images_copy
+                ON inventory_images(inventory_copy_id);
             CREATE INDEX IF NOT EXISTS idx_import_runs_game
                 ON import_runs(game_system, id);
             """
