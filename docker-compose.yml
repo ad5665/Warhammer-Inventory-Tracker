@@ -3,9 +3,12 @@ services:
     build: .
     image: wh40k-stock-tracker
     ports:
-      - "8000:8000"
+      - "${WH40K_PORT:-8000}:${WH40K_PORT:-8000}"
     environment:
       WH40K_DATA_DIR: /app/data
+      WH40K_AUTH_ENABLED: ${WH40K_AUTH_ENABLED:-false}
+      WH40K_COOKIE_SECURE: ${WH40K_COOKIE_SECURE:-false}
+      WH40K_PORT: ${WH40K_PORT:-8000}
     volumes:
       - wh40k-stock-data:/app/data
 

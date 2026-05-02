@@ -25,6 +25,7 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 - Track **model number(s)**, for example a number written under a figure base.
 - Upload photos for each inventory row and mark each photo as built, painted, WIP, reference, or other.
 - Export the current tab's inventory as CSV.
+- Optional username/password login for public hosting, with an admin-only user creation portal.
 - Uses local SQLite only; no hosted service is required.
 
 ## Screenshots
@@ -61,6 +62,18 @@ http://127.0.0.1:8000
 
 Then choose the **40k**, **Kill Team**, or **AoS** tab and click the sync button for that tab.
 
+To run the local dev server with login enabled:
+
+```bash
+python run.py --auth
+```
+
+Set `WH40K_PORT` to change the listen port without passing `--port`:
+
+```bash
+WH40K_PORT=9000 python run.py
+```
+
 ## Optional Docker run
 
 Create a named Docker volume once, then run with Compose. The SQLite database, uploads, and downloaded BSData live in `wh40k-stock-data`, so they survive container recreation:
@@ -79,6 +92,55 @@ docker run --rm -p 8000:8000 --mount source=wh40k-stock-data,target=/app/data wh
 ```
 
 Then open `http://127.0.0.1:8000`.
+
+To run Docker on another port, set `WH40K_PORT` for both the app and Compose port mapping:
+
+```bash
+WH40K_PORT=9000 docker compose up --build
+```
+
+With plain Docker:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e WH40K_PORT=9000 \
+  --mount source=wh40k-stock-data,target=/app/data \
+  wh40k-stock-tracker
+```
+
+## Optional authentication
+
+Authentication is off by default for local use. To require a login when hosting publicly, enable it at runtime:
+
+```bash
+WH40K_AUTH_ENABLED=true docker compose up --build
+```
+
+With plain Docker:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e WH40K_AUTH_ENABLED=true \
+  --mount source=wh40k-stock-data,target=/app/data \
+  wh40k-stock-tracker
+```
+
+On the first startup with auth enabled, if no admin user exists, the app creates `admin` with a temporary password and prints it to the container logs. Read it with:
+
+```bash
+docker compose logs web
+```
+
+Sign in, open `/admin`, and set your permanent admin password. Users can only be created from `/admin`; there is no public account registration page. When auth is enabled, each user has their own inventory list and uploaded photos; BSData catalogue imports are shared.
+
+Useful auth environment variables:
+
+- `WH40K_AUTH_ENABLED=true` - require login for the app, API, and uploads.
+- `WH40K_PORT=8000` - listen on a different app/container port. The Docker Compose file also maps this as the host port.
+- `PORT=8000` - fallback listen-port variable for hosting platforms that provide `PORT`.
+- `WH40K_ADMIN_USERNAME=admin` - initial admin username when bootstrapping auth.
+- `WH40K_SESSION_DAYS=30` - login session lifetime.
+- `WH40K_COOKIE_SECURE=true` - use this when serving only over HTTPS.
 
 ## How syncing works
 
@@ -115,6 +177,8 @@ Most read endpoints accept a `game_system` query parameter. Valid values are:
 Main endpoints:
 
 - `GET /` - web front end
+- `GET /login` - login page when auth is enabled
+- `GET /admin` - admin portal for setting the admin password and creating users
 - `GET /api/game-systems` - available game systems
 - `POST /api/sync/wh40k_10e` - clone/pull 40k BSData and import `.cat` files
 - `POST /api/sync/kill_team` - clone/pull Kill Team BSData and import `.cat` files
@@ -136,7 +200,7 @@ Main endpoints:
 
 ## Data model notes
 
-`bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles discovered in the `.cat` XML. `inventory_items` contains your own collection, also scoped by `game_system`. `inventory_copies` stores one child record per inventory quantity, including per-copy base number, wargear selections, location, notes, and photos. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
+`bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles discovered in the `.cat` XML. `inventory_items` contains your own collection, scoped by `game_system` and, when auth is enabled, `owner_user_id`. `inventory_copies` stores one child record per inventory quantity, including per-copy base number, wargear selections, location, notes, and photos. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
 
 Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`, or `/app/data/uploads/inventory/{inventory_item_id}/` in Docker. They are served locally by the app under `/uploads/...` and are not sent anywhere.
 
@@ -148,6 +212,8 @@ The app performs lightweight SQLite migrations on startup:
 - Adds `wargear`, `wargear_selections_json`, and `model_number` columns.
 - Adds the `inventory_images` table for local photo uploads.
 - Adds `inventory_copies` and links uploaded images to the relevant per-quantity copy when available.
+- Adds `auth_users` and `auth_sessions` for optional local login protection.
+- Adds `owner_user_id` to inventory rows. On the first auth-enabled startup after upgrading, existing unowned inventory is assigned to the first admin account.
 
 Keep a copy of `data/stock_tracker.db` before upgrading if you want an easy rollback.
 

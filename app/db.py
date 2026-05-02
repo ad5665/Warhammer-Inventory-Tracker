@@ -72,6 +72,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS inventory_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_user_id INTEGER,
                 game_system TEXT NOT NULL DEFAULT 'wh40k_10e',
                 unit_id INTEGER,
                 unit_name TEXT NOT NULL,
@@ -132,12 +133,33 @@ def init_db() -> None:
                 units_imported INTEGER NOT NULL DEFAULT 0,
                 errors_json TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS auth_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                must_change_password INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_login_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+            );
             """
         )
 
         # Lightweight migrations for databases created by earlier versions of
         # the app. SQLite can add simple columns without rebuilding the table.
         _ensure_column(conn, "bsd_units", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
+        _ensure_column(conn, "inventory_items", "owner_user_id", "owner_user_id INTEGER")
         _ensure_column(conn, "inventory_items", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
         _ensure_column(conn, "bsd_units", "wargear_options_json", "wargear_options_json TEXT")
         _ensure_column(conn, "inventory_items", "wargear", "wargear TEXT")
@@ -161,6 +183,10 @@ def init_db() -> None:
                 ON inventory_items(game_system, unit_name COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_inventory_model_number
                 ON inventory_items(game_system, model_number COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_inventory_owner_game
+                ON inventory_items(owner_user_id, game_system);
+            CREATE INDEX IF NOT EXISTS idx_inventory_owner_game_name
+                ON inventory_items(owner_user_id, game_system, unit_name COLLATE NOCASE);
 
             CREATE INDEX IF NOT EXISTS idx_inventory_copies_item
                 ON inventory_copies(inventory_item_id, copy_number);
@@ -173,6 +199,12 @@ def init_db() -> None:
                 ON inventory_images(inventory_copy_id);
             CREATE INDEX IF NOT EXISTS idx_import_runs_game
                 ON import_runs(game_system, id);
+            CREATE INDEX IF NOT EXISTS idx_auth_users_username
+                ON auth_users(username COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_token
+                ON auth_sessions(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
+                ON auth_sessions(user_id);
             """
         )
 

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
+import html
 import io
 import json
+import os
+import re
+import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -31,6 +39,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+AUTH_COOKIE_NAME = "wh40k_session"
+PASSWORD_HASH_ITERATIONS = 260_000
 ALLOWED_IMAGE_TYPES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -38,6 +48,20 @@ ALLOWED_IMAGE_TYPES = {
     "image/gif": ".gif",
 }
 ALLOWED_IMAGE_ROLES = {"built", "painted", "wip", "reference", "other"}
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,40}$")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+AUTH_ENABLED = _env_flag("WH40K_AUTH_ENABLED", False)
+AUTH_COOKIE_SECURE = _env_flag("WH40K_COOKIE_SECURE", False)
+AUTH_SESSION_DAYS = max(1, int(os.getenv("WH40K_SESSION_DAYS", "30") or 30))
+INITIAL_ADMIN_USERNAME = os.getenv("WH40K_ADMIN_USERNAME", "admin").strip() or "admin"
 
 
 class InventoryPayload(BaseModel):
@@ -66,9 +90,123 @@ class InventoryCopyPayload(BaseModel):
     notes: str | None = None
 
 
+def auth_enabled() -> bool:
+    return AUTH_ENABLED
+
+
+def _password_hash(password: str, salt: str | None = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations_text, salt, expected = stored_hash.split("$", 3)
+        iterations = int(iterations_text)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(digest, expected)
+
+
+def _session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _clean_username(username: str | None) -> str:
+    cleaned = (username or "").strip().lower()
+    if not USERNAME_RE.fullmatch(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 3-40 characters and use only letters, numbers, dots, hyphens, or underscores.",
+        )
+    return cleaned
+
+
+def _password_error(password: str | None) -> str | None:
+    if not password or len(password) < 10:
+        return "Password must be at least 10 characters."
+    if len(password) > 200:
+        return "Password is too long."
+    return None
+
+
+def _assign_unowned_inventory_to_admin(conn: Any, admin_id: int) -> None:
+    conn.execute(
+        "UPDATE inventory_items SET owner_user_id = ? WHERE owner_user_id IS NULL",
+        (admin_id,),
+    )
+
+
+def ensure_initial_admin_user() -> None:
+    if not auth_enabled():
+        return
+
+    username = _clean_username(INITIAL_ADMIN_USERNAME)
+    with connect() as conn:
+        admin = conn.execute(
+            "SELECT id FROM auth_users WHERE is_admin = 1 ORDER BY id LIMIT 1",
+        ).fetchone()
+        if admin is not None:
+            _assign_unowned_inventory_to_admin(conn, int(admin["id"]))
+            return
+
+        temporary_password = secrets.token_urlsafe(18)
+        now = utc_now_sql()
+        existing = conn.execute(
+            "SELECT id FROM auth_users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO auth_users (
+                    username, password_hash, is_admin, must_change_password, created_at, updated_at
+                ) VALUES (?, ?, 1, 1, ?, ?)
+                """,
+                (username, _password_hash(temporary_password), now, now),
+            )
+            admin_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        else:
+            conn.execute(
+                """
+                UPDATE auth_users
+                SET password_hash = ?, is_admin = 1, must_change_password = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (_password_hash(temporary_password), now, existing["id"]),
+            )
+            admin_id = int(existing["id"])
+        _assign_unowned_inventory_to_admin(conn, admin_id)
+
+    message = (
+        "WH40K_AUTH_ENABLED is true and no admin user existed. "
+        f"Temporary admin credentials: username={username} password={temporary_password} "
+        "Open /admin after logging in and set a new password."
+    )
+    print(message, flush=True)
+
+
+def _escape(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""))
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    ensure_initial_admin_user()
     yield
 
 
@@ -79,12 +217,483 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+def _public_auth_path(path: str) -> bool:
+    return path in {"/login", "/auth/login", "/logout", "/favicon.ico"}
+
+
+def _request_target(request: Request) -> str:
+    path = request.url.path
+    return f"{path}?{request.url.query}" if request.url.query else path
+
+
+def _login_redirect(request: Request) -> RedirectResponse:
+    return RedirectResponse(url=f"/login?next={quote(_request_target(request))}", status_code=303)
+
+
+def _get_session_user(request: Request) -> dict[str, Any] | None:
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    if not token:
+        return None
+
+    token_hash = _session_token_hash(token)
+    now = int(time.time())
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT u.*
+            FROM auth_sessions s
+            JOIN auth_users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        session = conn.execute(
+            "SELECT id, expires_at FROM auth_sessions WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if session is None:
+            return None
+        if int(session["expires_at"]) <= now:
+            conn.execute("DELETE FROM auth_sessions WHERE id = ?", (session["id"],))
+            return None
+        return dict(row) if row is not None else None
+
+
+def _require_user(request: Request) -> dict[str, Any]:
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return user
+
+
+def _require_admin(request: Request) -> dict[str, Any]:
+    user = _require_user(request)
+    if not int(user.get("is_admin") or 0):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if not auth_enabled():
+        return await call_next(request)
+
+    path = request.url.path
+    if _public_auth_path(path):
+        return await call_next(request)
+
+    user = _get_session_user(request)
+    request.state.user = user
+    if user is None:
+        if path.startswith("/api"):
+            return JSONResponse({"detail": "Authentication required."}, status_code=401)
+        return _login_redirect(request)
+
+    password_change_allowed = path in {"/admin", "/admin/password", "/auth/logout"}
+    if int(user.get("must_change_password") or 0) and not password_change_allowed:
+        if path.startswith("/api"):
+            return JSONResponse({"detail": "Password change required."}, status_code=403)
+        return RedirectResponse(url="/admin", status_code=303)
+
+    return await call_next(request)
+
+
+def _html_page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{_escape(title)} - Warhammer Stock Tracker</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0c1117;
+      --panel: #151d27;
+      --panel-soft: #1c2633;
+      --text: #eef3f8;
+      --muted: #aab8c6;
+      --border: #2c3b4c;
+      --accent: #f2c14e;
+      --danger: #f97066;
+      --ok: #58d68d;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: linear-gradient(180deg, #0c1117 0%, #0f1720 100%);
+      color: var(--text);
+      display: grid;
+      place-items: start center;
+      padding: 32px 16px;
+    }}
+    main {{ width: min(880px, 100%); display: grid; gap: 18px; }}
+    .panel {{
+      background: rgba(21, 29, 39, 0.95);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3);
+    }}
+    h1, h2 {{ margin: 0 0 12px; }}
+    p {{ color: var(--muted); line-height: 1.5; }}
+    form {{ display: grid; gap: 12px; }}
+    label {{ display: grid; gap: 6px; color: var(--muted); font-size: 0.9rem; }}
+    input {{
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 12px;
+      color: var(--text);
+      background: #0f1620;
+      font: inherit;
+    }}
+    input[type="checkbox"] {{ width: auto; }}
+    button, .button-link {{
+      border: 0;
+      border-radius: 10px;
+      padding: 11px 14px;
+      color: #111820;
+      background: var(--accent);
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      justify-content: center;
+    }}
+    .button-row {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }}
+    .secondary {{ background: #d9e4ef; color: #111820; }}
+    .message {{ padding: 10px 12px; border-radius: 10px; background: var(--panel-soft); }}
+    .error {{ background: rgba(249, 112, 102, 0.18); border: 1px solid rgba(249, 112, 102, 0.45); }}
+    .ok {{ background: rgba(88, 214, 141, 0.16); border: 1px solid rgba(88, 214, 141, 0.42); }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ text-align: left; border-bottom: 1px solid var(--border); padding: 8px; vertical-align: top; }}
+    th {{ color: var(--muted); font-size: 0.78rem; text-transform: uppercase; }}
+  </style>
+</head>
+<body>
+  <main>{body}</main>
+</body>
+</html>
+""")
+
+
+def _message_html(message: str | None, kind: str = "ok") -> str:
+    if not message:
+        return ""
+    return f'<div class="message {kind}">{_escape(message)}</div>'
+
+
+def _login_page(next_url: str = "/", error: str | None = None) -> HTMLResponse:
+    if not auth_enabled():
+        return _html_page("Login", """
+          <section class="panel">
+            <h1>Authentication is disabled</h1>
+            <p>This instance is currently running without login protection.</p>
+            <a class="button-link" href="/">Open tracker</a>
+          </section>
+        """)
+    return _html_page("Login", f"""
+      <section class="panel">
+        <h1>Warhammer Stock Tracker</h1>
+        <p>Sign in to open the tracker.</p>
+        {_message_html(error, "error")}
+        <form method="post" action="/auth/login">
+          <input type="hidden" name="next_url" value="{_escape(next_url or "/")}">
+          <label>
+            Username
+            <input name="username" autocomplete="username" required autofocus>
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button type="submit">Sign in</button>
+        </form>
+      </section>
+    """)
+
+
+def _admin_page(user: dict[str, Any], message: str | None = None, error: str | None = None) -> HTMLResponse:
+    with connect() as conn:
+        users = conn.execute(
+            """
+            SELECT id, username, is_admin, must_change_password, created_at, last_login_at
+            FROM auth_users
+            ORDER BY username COLLATE NOCASE
+            """
+        ).fetchall()
+
+    user_rows = "".join(
+        f"""
+        <tr>
+          <td>{_escape(row["username"])}</td>
+          <td>{"Admin" if int(row["is_admin"] or 0) else "User"}</td>
+          <td>{"Password change required" if int(row["must_change_password"] or 0) else "Active"}</td>
+          <td>{_escape(row["last_login_at"] or "Never")}</td>
+        </tr>
+        """
+        for row in users
+    )
+    current_required = "" if int(user.get("must_change_password") or 0) else "required"
+    current_password_field = "" if int(user.get("must_change_password") or 0) else f"""
+      <label>
+        Current password
+        <input name="current_password" type="password" autocomplete="current-password" {current_required}>
+      </label>
+    """
+    intro = "Set a permanent admin password before using the tracker." if int(user.get("must_change_password") or 0) else "Manage local users for this tracker."
+
+    return _html_page("Admin", f"""
+      <section class="panel">
+        <div class="button-row" style="justify-content: space-between;">
+          <div>
+            <h1>Admin</h1>
+            <p>{_escape(intro)}</p>
+          </div>
+          <form method="post" action="/auth/logout">
+            <button class="secondary" type="submit">Sign out</button>
+          </form>
+        </div>
+        {_message_html(message, "ok")}
+        {_message_html(error, "error")}
+      </section>
+
+      <section class="panel">
+        <h2>Set your password</h2>
+        <form method="post" action="/admin/password">
+          {current_password_field}
+          <label>
+            New password
+            <input name="new_password" type="password" autocomplete="new-password" required>
+          </label>
+          <label>
+            Confirm new password
+            <input name="confirm_password" type="password" autocomplete="new-password" required>
+          </label>
+          <button type="submit">Update password</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Create user</h2>
+        <form method="post" action="/admin/users">
+          <label>
+            Username
+            <input name="username" required>
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="new-password" required>
+          </label>
+          <label style="display: flex; gap: 8px; align-items: center;">
+            <input name="is_admin" type="checkbox" value="1">
+            Admin user
+          </label>
+          <button type="submit">Create user</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Users</h2>
+        <table>
+          <thead>
+            <tr><th>Username</th><th>Role</th><th>Status</th><th>Last login</th></tr>
+          </thead>
+          <tbody>{user_rows or '<tr><td colspan="4">No users yet.</td></tr>'}</tbody>
+        </table>
+      </section>
+    """)
+
+
+def _safe_next_url(next_url: str | None) -> str:
+    if not next_url or not next_url.startswith("/") or next_url.startswith("//"):
+        return "/"
+    return next_url
+
+
+def _issue_session_response(user_id: int, redirect_to: str) -> RedirectResponse:
+    token = secrets.token_urlsafe(32)
+    now = utc_now_sql()
+    expires_at = int(time.time()) + (AUTH_SESSION_DAYS * 24 * 60 * 60)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (_session_token_hash(token), user_id, now, expires_at),
+        )
+        conn.execute(
+            "UPDATE auth_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, user_id),
+        )
+
+    response = RedirectResponse(url=redirect_to, status_code=303)
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        token,
+        max_age=AUTH_SESSION_DAYS * 24 * 60 * 60,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite="lax",
+    )
+    return response
+
+
+def _clear_session_response(request: Request, redirect_to: str = "/login") -> RedirectResponse:
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    if token:
+        with connect() as conn:
+            conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (_session_token_hash(token),))
+    response = RedirectResponse(url=redirect_to, status_code=303)
+    response.delete_cookie(AUTH_COOKIE_NAME)
+    return response
+
+
+@app.get("/login", include_in_schema=False)
+def login(next: str = "/"):
+    return _login_page(_safe_next_url(next))
+
+
+@app.post("/auth/login", include_in_schema=False)
+def login_submit(
+    username: str = Form(...),
+    password: str = Form(...),
+    next_url: str = Form(default="/"),
+):
+    if not auth_enabled():
+        return RedirectResponse(url="/", status_code=303)
+
+    cleaned_username = username.strip().lower()
+    with connect() as conn:
+        user = conn.execute("SELECT * FROM auth_users WHERE username = ?", (cleaned_username,)).fetchone()
+    if user is None or not _verify_password(password, user["password_hash"]):
+        return _login_page(_safe_next_url(next_url), "Invalid username or password.")
+
+    redirect_to = "/admin" if int(user["must_change_password"] or 0) else _safe_next_url(next_url)
+    return _issue_session_response(int(user["id"]), redirect_to)
+
+
+@app.get("/logout", include_in_schema=False)
+def logout_get(request: Request) -> RedirectResponse:
+    return _clear_session_response(request)
+
+
+@app.post("/auth/logout", include_in_schema=False)
+def logout_post(request: Request) -> RedirectResponse:
+    return _clear_session_response(request)
+
+
+@app.get("/admin", include_in_schema=False)
+def admin(request: Request) -> HTMLResponse:
+    if not auth_enabled():
+        return _html_page("Admin", """
+          <section class="panel">
+            <h1>Authentication is disabled</h1>
+            <p>Set <code>WH40K_AUTH_ENABLED=true</code> before starting the app to use the admin portal.</p>
+          </section>
+        """)
+    return _admin_page(_require_admin(request))
+
+
+@app.post("/admin/password", include_in_schema=False)
+def admin_password(
+    request: Request,
+    current_password: str = Form(default=""),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> HTMLResponse:
+    user = _require_admin(request)
+    if new_password != confirm_password:
+        return _admin_page(user, error="New password and confirmation do not match.")
+    if error := _password_error(new_password):
+        return _admin_page(user, error=error)
+    if not int(user.get("must_change_password") or 0) and not _verify_password(current_password, user["password_hash"]):
+        return _admin_page(user, error="Current password is incorrect.")
+
+    now = utc_now_sql()
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE auth_users
+            SET password_hash = ?, must_change_password = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (_password_hash(new_password), now, user["id"]),
+        )
+        updated = dict(conn.execute("SELECT * FROM auth_users WHERE id = ?", (user["id"],)).fetchone())
+    request.state.user = updated
+    return _admin_page(updated, message="Password updated.")
+
+
+@app.post("/admin/users", include_in_schema=False)
+def admin_create_user(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    is_admin: str | None = Form(default=None),
+) -> HTMLResponse:
+    user = _require_admin(request)
+    try:
+        cleaned_username = _clean_username(username)
+    except HTTPException as exc:
+        return _admin_page(user, error=str(exc.detail))
+    if error := _password_error(password):
+        return _admin_page(user, error=error)
+
+    now = utc_now_sql()
+    try:
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO auth_users (
+                    username, password_hash, is_admin, must_change_password, created_at, updated_at
+                ) VALUES (?, ?, ?, 0, ?, ?)
+                """,
+                (cleaned_username, _password_hash(password), 1 if is_admin else 0, now, now),
+            )
+    except Exception:
+        return _admin_page(user, error=f"Could not create user '{cleaned_username}'. The username may already exist.")
+    return _admin_page(user, message=f"Created user '{cleaned_username}'.")
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    if not auth_enabled():
+        return {"auth_enabled": False, "user": None}
+    user = _require_user(request)
+    return {
+        "auth_enabled": True,
+        "user": {
+            "username": user["username"],
+            "is_admin": bool(user["is_admin"]),
+            "must_change_password": bool(user["must_change_password"]),
+        },
+    }
+
+
+def _inventory_owner_id(request: Request) -> int | None:
+    if not auth_enabled():
+        return None
+    return int(_require_user(request)["id"])
+
+
+def _inventory_owner_clause(owner_user_id: int | None, alias: str = "i") -> tuple[str, list[Any]]:
+    column = f"{alias}.owner_user_id" if alias else "owner_user_id"
+    if owner_user_id is None:
+        return f"{column} IS NULL", []
+    return f"{column} = ?", [owner_user_id]
 
 
 def _config_or_400(game_system: str | None) -> GameSystemConfig:
@@ -235,6 +844,30 @@ def _delete_image_file(inventory_item_id: int, file_name: str) -> None:
         pass
 
 
+@app.get("/uploads/inventory/{item_id}/{file_name}", include_in_schema=False)
+def uploaded_inventory_image(request: Request, item_id: int, file_name: str) -> FileResponse:
+    safe_name = Path(file_name).name
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
+    with connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT img.file_name
+            FROM inventory_images img
+            JOIN inventory_items i ON i.id = img.inventory_item_id
+            WHERE img.inventory_item_id = ? AND img.file_name = ? AND {owner_clause}
+            """,
+            [item_id, safe_name, *owner_params],
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    path = _image_path(item_id, safe_name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(path)
+
+
 def _copy_payload_data(payload: InventoryCopyPayload, wargear_options: list[dict[str, Any]]) -> dict[str, Any]:
     data = payload.model_dump()
     data["model_number"] = _clean_optional(data.get("model_number"))
@@ -338,6 +971,7 @@ def _trim_inventory_copies(conn: Any, item_id: int, quantity: int) -> list[Any]:
 
 def _inventory_dict(row: Any) -> dict[str, Any]:
     item = dict(row)
+    item.pop("owner_user_id", None)
     item["unbuilt_count"] = max(int(item.get("models_owned") or 0) - int(item.get("built_count") or 0), 0)
     item["unpainted_count"] = max(int(item.get("models_owned") or 0) - int(item.get("painted_count") or 0), 0)
     item["wargear_selections"] = _decode_wargear_selections(item.pop("wargear_selections_json", None))
@@ -460,9 +1094,10 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
     return data
 
 
-def _inventory_item_response(conn: Any, item_id: int) -> dict[str, Any]:
+def _inventory_item_response(conn: Any, item_id: int, owner_user_id: int | None) -> dict[str, Any]:
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     row = conn.execute(
-        """
+        f"""
         SELECT
             i.*,
             u.points AS current_points,
@@ -472,9 +1107,9 @@ def _inventory_item_response(conn: Any, item_id: int) -> dict[str, Any]:
             u.active AS unit_active
         FROM inventory_items i
         LEFT JOIN bsd_units u ON u.id = i.unit_id
-        WHERE i.id = ?
+        WHERE i.id = ? AND {owner_clause}
         """,
-        (item_id,),
+        [item_id, *owner_params],
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Inventory item not found.")
@@ -491,15 +1126,16 @@ def _inventory_item_response(conn: Any, item_id: int) -> dict[str, Any]:
     return item
 
 
-def _item_wargear_options(conn: Any, item_id: int) -> list[dict[str, Any]]:
+def _item_wargear_options(conn: Any, item_id: int, owner_user_id: int | None) -> list[dict[str, Any]]:
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     row = conn.execute(
-        """
+        f"""
         SELECT u.wargear_options_json
         FROM inventory_items i
         LEFT JOIN bsd_units u ON u.id = i.unit_id
-        WHERE i.id = ?
+        WHERE i.id = ? AND {owner_clause}
         """,
-        (item_id,),
+        [item_id, *owner_params],
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Inventory item not found.")
@@ -546,9 +1182,11 @@ def game_systems() -> list[dict[str, Any]]:
 
 
 @app.get("/api/status")
-def status(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> dict[str, Any]:
+def status(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> dict[str, Any]:
     config = _config_or_400(game_system)
     bsdata_dir = _bsdata_dir(config)
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
         last_run = conn.execute(
             "SELECT * FROM import_runs WHERE game_system = ? ORDER BY id DESC LIMIT 1",
@@ -563,17 +1201,17 @@ def status(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> dict[str, A
             (config.id,),
         ).fetchone()["count"]
         inventory_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM inventory_items WHERE game_system = ?",
-            (config.id,),
+            f"SELECT COUNT(*) AS count FROM inventory_items i WHERE i.game_system = ? AND {owner_clause}",
+            [config.id, *owner_params],
         ).fetchone()["count"]
         image_count = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS count
             FROM inventory_images img
             JOIN inventory_items i ON i.id = img.inventory_item_id
-            WHERE i.game_system = ?
+            WHERE i.game_system = ? AND {owner_clause}
             """,
-            (config.id,),
+            [config.id, *owner_params],
         ).fetchone()["count"]
         return {
             "game_system": config.id,
@@ -724,11 +1362,13 @@ def units(
 
 
 @app.get("/api/inventory")
-def inventory(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dict[str, Any]]:
+def inventory(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dict[str, Any]]:
     config = _config_or_400(game_system)
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 i.*,
                 u.points AS current_points,
@@ -738,10 +1378,10 @@ def inventory(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dic
                 u.active AS unit_active
             FROM inventory_items i
             LEFT JOIN bsd_units u ON u.id = i.unit_id
-            WHERE i.game_system = ?
+            WHERE i.game_system = ? AND {owner_clause}
             ORDER BY COALESCE(i.faction, ''), i.unit_name COLLATE NOCASE, i.id
             """,
-            (config.id,),
+            [config.id, *owner_params],
         ).fetchall()
         output: list[dict[str, Any]] = []
         for row in rows:
@@ -759,19 +1399,21 @@ def inventory(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dic
 
 
 @app.post("/api/inventory", status_code=201)
-def create_inventory_item(payload: InventoryPayload) -> dict[str, Any]:
+def create_inventory_item(request: Request, payload: InventoryPayload) -> dict[str, Any]:
     now = utc_now_sql()
+    owner_user_id = _inventory_owner_id(request)
     with connect() as conn:
         data = _payload_with_unit_snapshot(payload, conn)
         cursor = conn.execute(
             """
             INSERT INTO inventory_items (
-                game_system, unit_id, unit_name, faction, catalogue_file, quantity, models_owned,
+                owner_user_id, game_system, unit_id, unit_name, faction, catalogue_file, quantity, models_owned,
                 built_count, painted_count, wargear, wargear_selections_json, model_number, storage_location, notes, acquired_on,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                owner_user_id,
                 data["game_system"],
                 data["unit_id"],
                 data["unit_name"],
@@ -794,21 +1436,27 @@ def create_inventory_item(payload: InventoryPayload) -> dict[str, Any]:
         item_id = cursor.lastrowid
         row = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
         _ensure_inventory_copies(conn, row)
-        return _inventory_item_response(conn, item_id)
+        return _inventory_item_response(conn, item_id, owner_user_id)
 
 
 @app.put("/api/inventory/{item_id}")
-def update_inventory_item(item_id: int, payload: InventoryPayload) -> dict[str, Any]:
+def update_inventory_item(request: Request, item_id: int, payload: InventoryPayload) -> dict[str, Any]:
     now = utc_now_sql()
     image_rows_to_delete: list[Any] = []
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
+    owner_update_clause, owner_update_params = _inventory_owner_clause(owner_user_id, alias="")
     with connect() as conn:
-        existing = conn.execute("SELECT id FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        existing = conn.execute(
+            f"SELECT id FROM inventory_items i WHERE i.id = ? AND {owner_clause}",
+            [item_id, *owner_params],
+        ).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="Inventory item not found.")
 
         data = _payload_with_unit_snapshot(payload, conn)
         conn.execute(
-            """
+            f"""
             UPDATE inventory_items SET
                 game_system = ?,
                 unit_id = ?,
@@ -826,9 +1474,9 @@ def update_inventory_item(item_id: int, payload: InventoryPayload) -> dict[str, 
                 notes = ?,
                 acquired_on = ?,
                 updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND {owner_update_clause}
             """,
-            (
+            [
                 data["game_system"],
                 data["unit_id"],
                 data["unit_name"],
@@ -846,12 +1494,16 @@ def update_inventory_item(item_id: int, payload: InventoryPayload) -> dict[str, 
                 data["acquired_on"],
                 now,
                 item_id,
-            ),
+                *owner_update_params,
+            ],
         )
         image_rows_to_delete = _trim_inventory_copies(conn, item_id, data["quantity"])
-        row = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        row = conn.execute(
+            f"SELECT * FROM inventory_items i WHERE i.id = ? AND {owner_clause}",
+            [item_id, *owner_params],
+        ).fetchone()
         _ensure_inventory_copies(conn, row)
-        item = _inventory_item_response(conn, item_id)
+        item = _inventory_item_response(conn, item_id, owner_user_id)
 
     for row in image_rows_to_delete:
         _delete_image_file(int(row["inventory_item_id"]), row["file_name"])
@@ -859,24 +1511,26 @@ def update_inventory_item(item_id: int, payload: InventoryPayload) -> dict[str, 
 
 
 @app.put("/api/inventory/{item_id}/copies/{copy_id}")
-def update_inventory_copy(item_id: int, copy_id: int, payload: InventoryCopyPayload) -> dict[str, Any]:
+def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload: InventoryCopyPayload) -> dict[str, Any]:
     now = utc_now_sql()
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
         copy_row = conn.execute(
-            """
+            f"""
             SELECT c.*
             FROM inventory_copies c
             JOIN inventory_items i ON i.id = c.inventory_item_id
-            WHERE c.id = ? AND c.inventory_item_id = ?
+            WHERE c.id = ? AND c.inventory_item_id = ? AND {owner_clause}
             """,
-            (copy_id, item_id),
+            [copy_id, item_id, *owner_params],
         ).fetchone()
         if copy_row is None:
             raise HTTPException(status_code=404, detail="Inventory copy not found.")
 
-        data = _copy_payload_data(payload, _item_wargear_options(conn, item_id))
+        data = _copy_payload_data(payload, _item_wargear_options(conn, item_id, owner_user_id))
         conn.execute(
-            """
+            f"""
             UPDATE inventory_copies SET
                 model_number = ?,
                 wargear = ?,
@@ -885,8 +1539,13 @@ def update_inventory_copy(item_id: int, copy_id: int, payload: InventoryCopyPayl
                 notes = ?,
                 updated_at = ?
             WHERE id = ? AND inventory_item_id = ?
+              AND EXISTS (
+                SELECT 1
+                FROM inventory_items i
+                WHERE i.id = inventory_copies.inventory_item_id AND {owner_clause}
+              )
             """,
-            (
+            [
                 data["model_number"],
                 data["wargear"],
                 data["wargear_selections_json"],
@@ -895,7 +1554,8 @@ def update_inventory_copy(item_id: int, copy_id: int, payload: InventoryCopyPayl
                 now,
                 copy_id,
                 item_id,
-            ),
+                *owner_params,
+            ],
         )
         row = conn.execute("SELECT * FROM inventory_copies WHERE id = ?", (copy_id,)).fetchone()
         copy = _inventory_copy_dict(row)
@@ -905,13 +1565,24 @@ def update_inventory_copy(item_id: int, copy_id: int, payload: InventoryCopyPayl
 
 
 @app.delete("/api/inventory/{item_id}", status_code=204)
-def delete_inventory_item(item_id: int) -> Response:
+def delete_inventory_item(request: Request, item_id: int) -> Response:
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
+    owner_delete_clause, owner_delete_params = _inventory_owner_clause(owner_user_id, alias="")
     with connect() as conn:
         image_rows = conn.execute(
-            "SELECT inventory_item_id, file_name FROM inventory_images WHERE inventory_item_id = ?",
-            (item_id,),
+            f"""
+            SELECT img.inventory_item_id, img.file_name
+            FROM inventory_images img
+            JOIN inventory_items i ON i.id = img.inventory_item_id
+            WHERE img.inventory_item_id = ? AND {owner_clause}
+            """,
+            [item_id, *owner_params],
         ).fetchall()
-        cursor = conn.execute("DELETE FROM inventory_items WHERE id = ?", (item_id,))
+        cursor = conn.execute(
+            f"DELETE FROM inventory_items WHERE id = ? AND {owner_delete_clause}",
+            [item_id, *owner_delete_params],
+        )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Inventory item not found.")
 
@@ -921,20 +1592,30 @@ def delete_inventory_item(item_id: int) -> Response:
 
 
 async def _store_inventory_image(
+    owner_user_id: int | None,
     item_id: int,
     image: UploadFile,
     image_role: str,
     caption: str | None = None,
     copy_id: int | None = None,
 ) -> dict[str, Any]:
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
-        item = conn.execute("SELECT id FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        item = conn.execute(
+            f"SELECT id FROM inventory_items i WHERE i.id = ? AND {owner_clause}",
+            [item_id, *owner_params],
+        ).fetchone()
         if item is None:
             raise HTTPException(status_code=404, detail="Inventory item not found.")
         if copy_id is not None:
             copy = conn.execute(
-                "SELECT id FROM inventory_copies WHERE id = ? AND inventory_item_id = ?",
-                (copy_id, item_id),
+                f"""
+                SELECT c.id
+                FROM inventory_copies c
+                JOIN inventory_items i ON i.id = c.inventory_item_id
+                WHERE c.id = ? AND c.inventory_item_id = ? AND {owner_clause}
+                """,
+                [copy_id, item_id, *owner_params],
             ).fetchone()
             if copy is None:
                 raise HTTPException(status_code=404, detail="Inventory copy not found.")
@@ -982,29 +1663,41 @@ async def _store_inventory_image(
 
 @app.post("/api/inventory/{item_id}/images", status_code=201)
 async def upload_inventory_image(
+    request: Request,
     item_id: int,
     image: UploadFile = File(...),
     image_role: str = Form(default="other"),
     caption: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    return await _store_inventory_image(item_id, image, image_role, caption)
+    return await _store_inventory_image(_inventory_owner_id(request), item_id, image, image_role, caption)
 
 
 @app.post("/api/inventory/{item_id}/copies/{copy_id}/images", status_code=201)
 async def upload_inventory_copy_image(
+    request: Request,
     item_id: int,
     copy_id: int,
     image: UploadFile = File(...),
     image_role: str = Form(default="other"),
     caption: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    return await _store_inventory_image(item_id, image, image_role, caption, copy_id)
+    return await _store_inventory_image(_inventory_owner_id(request), item_id, image, image_role, caption, copy_id)
 
 
 @app.delete("/api/images/{image_id}", status_code=204)
-def delete_inventory_image(image_id: int) -> Response:
+def delete_inventory_image(request: Request, image_id: int) -> Response:
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
-        row = conn.execute("SELECT * FROM inventory_images WHERE id = ?", (image_id,)).fetchone()
+        row = conn.execute(
+            f"""
+            SELECT img.*
+            FROM inventory_images img
+            JOIN inventory_items i ON i.id = img.inventory_item_id
+            WHERE img.id = ? AND {owner_clause}
+            """,
+            [image_id, *owner_params],
+        ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Image not found.")
         conn.execute("DELETE FROM inventory_images WHERE id = ?", (image_id,))
@@ -1014,11 +1707,13 @@ def delete_inventory_image(image_id: int) -> Response:
 
 
 @app.get("/api/export.csv")
-def export_inventory_csv(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> Response:
+def export_inventory_csv(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> Response:
     config = _config_or_400(game_system)
+    owner_user_id = _inventory_owner_id(request)
+    owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 i.id,
                 i.game_system,
@@ -1045,10 +1740,10 @@ def export_inventory_csv(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) 
                 i.updated_at
             FROM inventory_items i
             LEFT JOIN bsd_units u ON u.id = i.unit_id
-            WHERE i.game_system = ?
+            WHERE i.game_system = ? AND {owner_clause}
             ORDER BY i.unit_name COLLATE NOCASE
             """,
-            (config.id,),
+            [config.id, *owner_params],
         ).fetchall()
 
     fieldnames = [

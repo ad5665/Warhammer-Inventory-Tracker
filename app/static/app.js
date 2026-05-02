@@ -88,6 +88,12 @@ async function api(path, options = {}) {
 
   const response = await fetch(path, { ...options, headers });
 
+  if (response.status === 401) {
+    const next = encodeURIComponent(`${window.location.pathname}${window.location.search}`);
+    window.location.href = `/login?next=${next}`;
+    throw new Error("Authentication required.");
+  }
+
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
