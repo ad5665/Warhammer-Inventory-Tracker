@@ -25,6 +25,12 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 - Export the current tab's inventory as CSV.
 - Uses local SQLite only; no hosted service is required.
 
+## Screenshots
+
+![Tracker overview](docs/screenshots/tracker-overview.png)
+
+![Age of Sigmar catalogue tab](docs/screenshots/aos-catalogue.png)
+
 ## Quick start
 
 ```bash
