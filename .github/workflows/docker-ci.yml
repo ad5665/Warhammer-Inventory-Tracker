@@ -1,0 +1,85 @@
+name: Docker CI
+
+on:
+  push: {}
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test Docker image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: wh40k-stock-tracker:ci
+
+      - name: Start container
+        run: |
+          mkdir -p "${RUNNER_TEMP}/wh40k-data"
+          docker run --detach \
+            --name wh40k-stock-tracker \
+            --publish 8000:8000 \
+            --volume "${RUNNER_TEMP}/wh40k-data:/app/data" \
+            wh40k-stock-tracker:ci
+
+      - name: Wait for app
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/api/status > /tmp/status.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs wh40k-stock-tracker
+          exit 1
+
+      - name: Smoke test container
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:8000/ --output /tmp/index.html
+          grep -q "Warhammer Stock Tracker" /tmp/index.html
+
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import urllib.request
+
+          def get_json(path: str):
+              with urllib.request.urlopen(f"http://127.0.0.1:8000{path}", timeout=10) as response:
+                  assert response.status == 200
+                  return json.loads(response.read().decode("utf-8"))
+
+          systems = get_json("/api/game-systems")
+          system_ids = {system["id"] for system in systems}
+          assert {"wh40k_10e", "kill_team"} <= system_ids, systems
+
+          status = get_json("/api/status?game_system=wh40k_10e")
+          assert status["game_system"] == "wh40k_10e", status
+          assert status["database_path"] == "/app/data/stock_tracker.db", status
+
+          db_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "wh40k-data" / "stock_tracker.db"
+          assert db_path.exists(), f"Expected SQLite database at {db_path}"
+          PY
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs wh40k-stock-tracker
+
+      - name: Stop container
+        if: always()
+        run: docker rm --force wh40k-stock-tracker || true

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Warhammer Stock Tracker</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Warhammer inventory</p>
+      <h1 id="game-title">Stock Tracker</h1>
+      <p id="game-subtitle" class="subtitle">Track 40k and Kill Team models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.</p>
+    </div>
+    <div class="status-card">
+      <div class="status-line"><span>Active tab</span><strong id="active-game-label">40k</strong></div>
+      <div class="status-line"><span>Catalogue entries</span><strong id="unit-count">0</strong></div>
+      <div class="status-line"><span>Inventory rows</span><strong id="inventory-count">0</strong></div>
+      <div class="status-line"><span>Photos</span><strong id="image-count">0</strong></div>
+      <div class="status-line"><span>Last import</span><strong id="last-import">Never</strong></div>
+    </div>
+  </header>
+
+  <main>
+    <nav id="game-tabs" class="game-tabs" aria-label="Game system tabs">
+      <button type="button" class="tab active" data-game="wh40k_10e">40k</button>
+      <button type="button" class="tab" data-game="kill_team">Kill Team</button>
+    </nav>
+
+    <section class="panel sync-panel">
+      <div>
+        <h2>1. Sync BSData</h2>
+        <p id="sync-copy">Import the Warhammer 40,000 10th edition catalogues. Later, click this again to pull updates.</p>
+      </div>
+      <button id="sync-btn" class="primary">Sync BSData</button>
+    </section>
+
+    <section class="grid two-col">
+      <div class="panel">
+        <h2>2. Add from catalogue</h2>
+        <div class="form-row">
+          <label>
+            Search catalogue
+            <input id="unit-query" type="search" placeholder="Boyz, Intercessors, Chaos Lord...">
+          </label>
+          <label>
+            Faction / team
+            <select id="faction-filter">
+              <option value="">All factions</option>
+            </select>
+          </label>
+        </div>
+        <div id="unit-results" class="results empty">Sync BSData, then search for a unit or operative.</div>
+      </div>
+
+      <div class="panel">
+        <h2>Add custom item</h2>
+        <p class="hint">Use this for boxed sets, objective markers, kitbash projects, terrain, or items not found in BSData.</p>
+        <form id="custom-form" class="stacked-form">
+          <label>Item name <input name="unit_name" required placeholder="Combat Patrol, spare Nob, terrain..."></label>
+          <label>Faction / team <input name="faction" placeholder="Optional"></label>
+          <div class="form-row three">
+            <label>Quantity <input name="quantity" type="number" min="0" value="1"></label>
+            <label>Models <input name="models_owned" type="number" min="0" value="1"></label>
+            <label>Built <input name="built_count" type="number" min="0" value="0"></label>
+          </div>
+          <div class="form-row three">
+            <label>Painted <input name="painted_count" type="number" min="0" value="0"></label>
+            <label>Model # <input name="model_number" placeholder="Base number, e.g. CSM-014"></label>
+            <label>Location <input name="storage_location" placeholder="Shelf, case, box..."></label>
+          </div>
+          <label>Built wargear <textarea name="wargear" rows="3" placeholder="Power fist, plasma pistol, icon, specialist gear..."></textarea></label>
+          <label>Notes <textarea name="notes" rows="3" placeholder="Colour scheme, missing parts, repair notes..."></textarea></label>
+          <button class="secondary" type="submit">Add custom item</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel inventory-panel">
+      <div class="section-heading">
+        <div>
+          <h2>3. Inventory</h2>
+          <p>Update counts directly in the table. BSData-linked items show weapon options with quantity boxes; use the model number field for numbers written on bases, and upload built or painted photos per row.</p>
+        </div>
+        <a id="export-link" class="button-link" href="/api/export.csv?game_system=wh40k_10e">Export CSV</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Unit / item</th>
+              <th>Faction / team</th>
+              <th>Qty</th>
+              <th>Models</th>
+              <th>Built</th>
+              <th>Painted</th>
+              <th>Backlog</th>
+              <th>Model #</th>
+              <th>Wargear built with</th>
+              <th>Location</th>
+              <th>Photos</th>
+              <th>Notes</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="inventory-body">
+            <tr><td colspan="13" class="empty-cell">No inventory yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
