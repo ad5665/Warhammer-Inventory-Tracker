@@ -1,7 +1,6 @@
 services:
   web:
-    build: .
-    image: wh40k-stock-tracker
+    image: ad5665/warhammer-inventory-tracker:latest
     ports:
       - "${WH40K_PORT:-8000}:${WH40K_PORT:-8000}"
     environment:
