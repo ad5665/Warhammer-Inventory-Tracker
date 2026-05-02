@@ -559,7 +559,17 @@ function rowNumberField(row, field) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function itemQuantity(item, row = null) {
+  const rowValue = row?.querySelector('[data-field="quantity"]')?.value;
+  const value = rowValue !== undefined ? Number(rowValue || 0) : Number(item.quantity || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
 function itemModelCount(item, row = null) {
+  if (isFixedSingleModelUnit(item)) {
+    return itemQuantity(item, row);
+  }
+
   if (usesPerCopyModels(item)) {
     const total = (item.copies || []).reduce((sum, copy) => {
       const input = document.querySelector(`[data-copy-id="${copy.id}"] [data-copy-field="models_owned"]`);
@@ -1216,6 +1226,12 @@ function wireEvents() {
     const target = event.target;
     const copyCard = target.closest("[data-copy-id]");
     if (copyCard && (target.matches("[data-copy-field]") || target.matches("[data-copy-wargear-key]"))) {
+      const itemId = Number(copyCard.closest("tr[data-id]")?.dataset.id || 0);
+      const row = itemId ? document.querySelector(`tr[data-id="${itemId}"]`) : null;
+      if (row && target.matches('[data-copy-field="models_owned"]')) {
+        updateRowBacklog(row);
+        renderInventorySummary();
+      }
       scheduleCopyAutosave(copyCard);
       return;
     }
@@ -1229,6 +1245,12 @@ function wireEvents() {
     const target = event.target;
     const copyCard = target.closest("[data-copy-id]");
     if (copyCard && (target.matches("[data-copy-field]") || target.matches("[data-copy-wargear-key]"))) {
+      const itemId = Number(copyCard.closest("tr[data-id]")?.dataset.id || 0);
+      const row = itemId ? document.querySelector(`tr[data-id="${itemId}"]`) : null;
+      if (row && target.matches('[data-copy-field="models_owned"]')) {
+        updateRowBacklog(row);
+        renderInventorySummary();
+      }
       scheduleCopyAutosave(copyCard);
       return;
     }
