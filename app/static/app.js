@@ -5,6 +5,7 @@ const state = {
   gameSystems: [],
   currentGame: localStorage.getItem("warhammer-stock-current-game") || DEFAULT_GAME,
   lastUnitQuery: "",
+  unitResults: [],
   collapsedInventoryItems: new Set(),
 };
 
@@ -208,6 +209,10 @@ function unitStatsPills(unit) {
   if (unit.points !== null && unit.points !== undefined) {
     pills.unshift(`<span class="pill">${esc(unit.points)} pts</span>`);
   }
+  const size = unitSizeText(unit);
+  if (size) {
+    pills.push(`<span class="pill">${esc(size)}</span>`);
+  }
   if (unit.wargear_option_count) {
     pills.push(`<span class="pill">${esc(unit.wargear_option_count)} weapons</span>`);
   }
@@ -218,6 +223,65 @@ function unitStatsPills(unit) {
     }
   }
   return pills.length ? `<div class="stat-pills">${pills.join("")}</div>` : "";
+}
+
+function unitSizeText(unit) {
+  const min = Number(unit?.min_models ?? unit?.current_min_models);
+  const max = Number(unit?.max_models ?? unit?.current_max_models);
+  const hasMin = Number.isFinite(min) && min > 0;
+  const hasMax = Number.isFinite(max) && max > 0;
+  if (hasMin && hasMax && min === max) return `${min} ${min === 1 ? "model" : "models"}`;
+  if (hasMin && hasMax) return `${min}-${max} models`;
+  if (hasMin) return `${min}+ models`;
+  if (hasMax) return `up to ${max} models`;
+  return "";
+}
+
+function componentCountText(component) {
+  const min = Number(component?.min_models);
+  const max = Number(component?.max_models);
+  const hasMin = Number.isFinite(min) && min > 0;
+  const hasMax = Number.isFinite(max) && max > 0;
+  if (hasMin && hasMax && min === max) return String(min);
+  if (hasMin && hasMax) return `${min}-${max}`;
+  if (hasMin) return `${min}+`;
+  if (hasMax) return `0-${max}`;
+  return "";
+}
+
+function wargearNames(options, limit = 8) {
+  const names = [];
+  const seen = new Set();
+  for (const option of options || []) {
+    const name = String(option?.name || "").trim();
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  const visible = names.slice(0, limit);
+  const suffix = names.length > limit ? `, +${names.length - limit} more` : "";
+  return `${visible.join(", ")}${suffix}`;
+}
+
+function renderModelComposition(unit) {
+  const components = unit.model_composition || [];
+  if (!components.length) return "";
+
+  return `
+    <div class="composition-list">
+      ${components.map(component => {
+        const count = componentCountText(component);
+        const gear = wargearNames(component.wargear_options || []);
+        return `
+          <div class="composition-row">
+            <strong>${count ? `${esc(count)} ` : ""}${esc(component.name)}</strong>
+            ${gear ? `<small>${esc(gear)}</small>` : ""}
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
 }
 
 async function searchUnits() {
@@ -233,6 +297,7 @@ async function searchUnits() {
   try {
     const units = await api(withGame(`/api/units?${params.toString()}`));
     state.lastUnitQuery = query;
+    state.unitResults = units;
     if (!units.length) {
       container.innerHTML = '<div class="empty">No catalogue entries found. Try syncing BSData or using a broader search.</div>';
       return;
@@ -244,6 +309,7 @@ async function searchUnits() {
           <div class="result-title">${esc(unit.name)}</div>
           <div class="result-meta">${esc(unit.faction)} · ${esc(unit.catalogue_file)}</div>
           ${unitStatsPills(unit)}
+          ${renderModelComposition(unit)}
         </div>
         <button class="secondary" onclick="addUnit(${unit.id})">Add</button>
       </div>
@@ -255,13 +321,15 @@ async function searchUnits() {
 
 async function addUnit(unitId) {
   try {
+    const unit = state.unitResults.find(candidate => Number(candidate.id) === Number(unitId));
+    const defaultModels = Number(unit?.min_models || 1);
     await api("/api/inventory", {
       method: "POST",
       body: JSON.stringify({
         game_system: state.currentGame,
         unit_id: unitId,
         quantity: 1,
-        models_owned: 1,
+        models_owned: Number.isFinite(defaultModels) && defaultModels > 0 ? defaultModels : 1,
         built_count: 0,
         painted_count: 0,
       }),
@@ -628,6 +696,7 @@ function renderCopies(item) {
 
   const quantity = Number(item.quantity || copies.length);
   return `
+    ${renderModelComposition(item)}
     <div class="copy-grid">
       ${copies.map(copy => `
         <section class="copy-card" data-copy-id="${copy.id}">
@@ -730,6 +799,8 @@ function renderInventory() {
   body.innerHTML = state.inventory.map(item => {
     const inactive = item.unit_id && item.unit_active === 0 ? '<div class="row-sub">Catalogue entry not active after latest import</div>' : '';
     const points = item.current_points !== null && item.current_points !== undefined ? `<div class="row-sub">${esc(item.current_points)} pts currently</div>` : "";
+    const unitSize = unitSizeText(item);
+    const size = unitSize ? `<div class="row-sub">Valid size: ${esc(unitSize)}</div>` : "";
     const collapsed = isInventoryItemCollapsed(item.id);
     return `
       <tr data-id="${item.id}" class="${collapsed ? "inventory-row-collapsed" : ""}">
@@ -747,7 +818,7 @@ function renderInventory() {
             <div>
               <div class="row-title">${esc(item.unit_name)}</div>
               <div class="row-sub">${item.unit_id ? "BSData linked" : "Custom item"}</div>
-              ${points}${inactive}
+              ${points}${size}${inactive}
             </div>
           </div>
         </td>
@@ -998,6 +1069,7 @@ function customFormPayload(form) {
 function clearCatalogueSearch() {
   el("unit-query").value = "";
   state.lastUnitQuery = "";
+  state.unitResults = [];
 }
 
 async function refreshGameData() {

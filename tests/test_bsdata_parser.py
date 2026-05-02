@@ -73,8 +73,202 @@ def test_parse_catalogue_file_reads_model_entries_for_characters(tmp_path: Path)
     assert len(units) == 1
     assert units[0].name == "Chaos Lord"
     assert units[0].entry_type == "model"
+    assert units[0].min_models == 1
+    assert units[0].max_models == 1
     assert "Character" in units[0].keywords
     assert units[0].stats["W"] == "5"
+
+
+def test_parse_catalogue_file_reads_unit_size_from_model_group_constraints(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Test Faction">
+      <selectionEntries>
+        <selectionEntry id="unit-1" name="Intercessor Squad" type="unit">
+          <selectionEntryGroups>
+            <selectionEntryGroup id="models-1" name="Intercessors">
+              <selectionEntries>
+                <selectionEntry id="sergeant-1" name="Intercessor Sergeant" type="model">
+                  <constraints>
+                    <constraint type="min" value="1" field="selections" scope="parent" />
+                    <constraint type="max" value="1" field="selections" scope="parent" />
+                  </constraints>
+                </selectionEntry>
+                <selectionEntry id="model-1" name="Intercessor" type="model">
+                  <constraints>
+                    <constraint type="min" value="4" field="selections" scope="parent" />
+                    <constraint type="max" value="9" field="selections" scope="parent" />
+                  </constraints>
+                </selectionEntry>
+              </selectionEntries>
+              <constraints>
+                <constraint type="min" value="5" field="selections" scope="parent" />
+                <constraint type="max" value="10" field="selections" scope="parent" />
+              </constraints>
+            </selectionEntryGroup>
+          </selectionEntryGroups>
+        </selectionEntry>
+      </selectionEntries>
+    </catalogue>
+    '''
+    path = tmp_path / "Test.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    units = parse_catalogue_file(path)
+
+    assert len(units) == 1
+    assert units[0].min_models == 5
+    assert units[0].max_models == 10
+
+
+def test_parse_catalogue_file_sums_separate_model_groups_for_unit_size(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Test Faction">
+      <selectionEntries>
+        <selectionEntry id="unit-1" name="Boyz" type="unit">
+          <selectionEntryGroups>
+            <selectionEntryGroup id="boyz-1" name="9-19 Boyz">
+              <selectionEntries>
+                <selectionEntry id="boy-1" name="Boy" type="model" />
+              </selectionEntries>
+              <constraints>
+                <constraint type="min" value="9" field="selections" scope="parent" />
+                <constraint type="max" value="19" field="selections" scope="parent" />
+              </constraints>
+            </selectionEntryGroup>
+            <selectionEntryGroup id="nob-1" name="Boss Nob">
+              <selectionEntries>
+                <selectionEntry id="boss-nob-1" name="Boss Nob" type="model">
+                  <constraints>
+                    <constraint type="min" value="1" field="selections" scope="parent" />
+                    <constraint type="max" value="1" field="selections" scope="parent" />
+                  </constraints>
+                </selectionEntry>
+              </selectionEntries>
+            </selectionEntryGroup>
+          </selectionEntryGroups>
+        </selectionEntry>
+      </selectionEntries>
+    </catalogue>
+    '''
+    path = tmp_path / "Orks.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    units = parse_catalogue_file(path)
+
+    assert len(units) == 1
+    assert units[0].min_models == 10
+    assert units[0].max_models == 20
+
+
+def test_parse_catalogue_file_uses_numeric_model_group_name_for_unit_size(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Test Faction">
+      <selectionEntries>
+        <selectionEntry id="unit-1" name="Termagants" type="unit">
+          <selectionEntryGroups>
+            <selectionEntryGroup id="termagants-1" name="10-20 Termagants">
+              <selectionEntries>
+                <selectionEntry id="termagant-1" name="Termagant" type="model">
+                  <constraints>
+                    <constraint type="min" value="7" field="selections" scope="parent" />
+                    <constraint type="max" value="20" field="selections" scope="parent" />
+                  </constraints>
+                </selectionEntry>
+              </selectionEntries>
+            </selectionEntryGroup>
+          </selectionEntryGroups>
+        </selectionEntry>
+      </selectionEntries>
+    </catalogue>
+    '''
+    path = tmp_path / "Tyranids.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    units = parse_catalogue_file(path)
+
+    assert len(units) == 1
+    assert units[0].min_models == 10
+    assert units[0].max_models == 20
+
+
+def test_parse_catalogue_file_reads_model_composition_and_model_wargear(tmp_path: Path):
+    sample = '''<?xml version="1.0" encoding="UTF-8"?>
+    <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Chaos - Chaos Space Marines">
+      <selectionEntries>
+        <selectionEntry id="legionaries-1" name="Legionaries" type="unit">
+          <selectionEntries>
+            <selectionEntry id="champion-1" name="Aspiring Champion" type="model">
+              <constraints>
+                <constraint type="min" value="1" field="selections" scope="parent" />
+                <constraint type="max" value="1" field="selections" scope="parent" />
+              </constraints>
+              <selectionEntryGroups>
+                <selectionEntryGroup id="champion-wargear" name="Wargear">
+                  <selectionEntries>
+                    <selectionEntry id="plasma-pistol" name="Plasma pistol" type="upgrade">
+                      <profiles>
+                        <profile name="Plasma pistol" typeName="Ranged Weapons">
+                          <characteristics><characteristic name="Range">12&quot;</characteristic></characteristics>
+                        </profile>
+                      </profiles>
+                    </selectionEntry>
+                    <selectionEntry id="heavy-melee" name="Heavy melee weapon" type="upgrade">
+                      <profiles>
+                        <profile name="Heavy melee weapon" typeName="Melee Weapons">
+                          <characteristics><characteristic name="A">3</characteristic></characteristics>
+                        </profile>
+                      </profiles>
+                    </selectionEntry>
+                  </selectionEntries>
+                </selectionEntryGroup>
+              </selectionEntryGroups>
+            </selectionEntry>
+          </selectionEntries>
+          <selectionEntryGroups>
+            <selectionEntryGroup id="legionary-group" name="4 - 9 Legionaries">
+              <constraints>
+                <constraint type="min" value="4" field="selections" scope="parent" />
+                <constraint type="max" value="9" field="selections" scope="parent" />
+              </constraints>
+              <selectionEntries>
+                <selectionEntry id="legionary-1" name="Legionary w/ boltgun" type="model">
+                  <profiles>
+                    <profile name="Boltgun" typeName="Ranged Weapons">
+                      <characteristics><characteristic name="Range">24&quot;</characteristic></characteristics>
+                    </profile>
+                    <profile name="Close combat weapon" typeName="Melee Weapons">
+                      <characteristics><characteristic name="A">3</characteristic></characteristics>
+                    </profile>
+                  </profiles>
+                </selectionEntry>
+              </selectionEntries>
+            </selectionEntryGroup>
+          </selectionEntryGroups>
+        </selectionEntry>
+      </selectionEntries>
+    </catalogue>
+    '''
+    path = tmp_path / "Chaos - Chaos Space Marines.cat"
+    path.write_text(sample, encoding="utf-8")
+
+    units = parse_catalogue_file(path)
+
+    assert len(units) == 1
+    assert units[0].min_models == 5
+    assert units[0].max_models == 10
+    assert [(component.name, component.min_models, component.max_models) for component in units[0].model_composition] == [
+        ("Aspiring Champion", 1, 1),
+        ("Legionaries", 4, 9),
+    ]
+    by_name = {component.name: component for component in units[0].model_composition}
+    assert {option.name for option in by_name["Aspiring Champion"].wargear_options} == {
+        "Plasma pistol",
+        "Heavy melee weapon",
+    }
+    assert {option.name for option in by_name["Legionaries"].wargear_options} == {
+        "Boltgun",
+        "Close combat weapon",
+    }
 
 
 def test_parse_catalogue_file_prefixes_kill_team_ids(tmp_path: Path):

@@ -714,6 +714,10 @@ def _decode_wargear_options(raw: str | None) -> list[dict[str, Any]]:
         decoded = json.loads(raw)
     except json.JSONDecodeError:
         return []
+    return _wargear_options_from_payload(decoded)
+
+
+def _wargear_options_from_payload(decoded: Any) -> list[dict[str, Any]]:
     if not isinstance(decoded, list):
         return []
 
@@ -733,6 +737,44 @@ def _decode_wargear_options(raw: str | None) -> list[dict[str, Any]]:
             "stats": {str(k): str(v) for k, v in stats.items() if v is not None},
         })
     return options
+
+
+def _safe_optional_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _decode_model_composition(raw: str | None) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+
+    components: list[dict[str, Any]] = []
+    for component in decoded:
+        if not isinstance(component, dict):
+            continue
+        key = _clean_optional(str(component.get("key") or ""))
+        name = _clean_optional(str(component.get("name") or ""))
+        if not key or not name:
+            continue
+        options = _wargear_options_from_payload(component.get("wargear_options"))
+        components.append({
+            "key": key,
+            "name": name,
+            "min_models": _safe_optional_int(component.get("min_models")),
+            "max_models": _safe_optional_int(component.get("max_models")),
+            "wargear_options": options,
+            "wargear_option_count": len(options),
+        })
+    return components
 
 
 def _clean_wargear_selections(value: Any) -> dict[str, int]:
@@ -786,6 +828,7 @@ def _decode_stats(row: dict[str, Any]) -> dict[str, Any]:
 
     options = _decode_wargear_options(row.pop("wargear_options_json", None))
     row["wargear_option_count"] = len(options)
+    row["model_composition"] = _decode_model_composition(row.pop("model_composition_json", None))
     return row
 
 
@@ -976,6 +1019,7 @@ def _inventory_dict(row: Any) -> dict[str, Any]:
     item["unpainted_count"] = max(int(item.get("models_owned") or 0) - int(item.get("painted_count") or 0), 0)
     item["wargear_selections"] = _decode_wargear_selections(item.pop("wargear_selections_json", None))
     item["wargear_options"] = _decode_wargear_options(item.pop("current_wargear_options_json", None))
+    item["model_composition"] = _decode_model_composition(item.pop("current_model_composition_json", None))
     item.setdefault("images", [])
     return item
 
@@ -1101,9 +1145,12 @@ def _inventory_item_response(conn: Any, item_id: int, owner_user_id: int | None)
         SELECT
             i.*,
             u.points AS current_points,
+            u.min_models AS current_min_models,
+            u.max_models AS current_max_models,
             u.keywords AS current_keywords,
             u.stats_json AS current_stats_json,
             u.wargear_options_json AS current_wargear_options_json,
+            u.model_composition_json AS current_model_composition_json,
             u.active AS unit_active
         FROM inventory_items i
         LEFT JOIN bsd_units u ON u.id = i.unit_id
@@ -1322,7 +1369,8 @@ def units(
     sql = [
         """
         SELECT id, game_system, bs_id, name, faction, catalogue_file, entry_type, points,
-               keywords, stats_json, wargear_options_json, imported_at
+               min_models, max_models, keywords, stats_json, wargear_options_json,
+               model_composition_json, imported_at
         FROM bsd_units
         WHERE game_system = ? AND active = 1
         """
@@ -1372,9 +1420,12 @@ def inventory(request: Request, game_system: str = Query(default=DEFAULT_GAME_SY
             SELECT
                 i.*,
                 u.points AS current_points,
+                u.min_models AS current_min_models,
+                u.max_models AS current_max_models,
                 u.keywords AS current_keywords,
                 u.stats_json AS current_stats_json,
                 u.wargear_options_json AS current_wargear_options_json,
+                u.model_composition_json AS current_model_composition_json,
                 u.active AS unit_active
             FROM inventory_items i
             LEFT JOIN bsd_units u ON u.id = i.unit_id
@@ -1733,8 +1784,11 @@ def export_inventory_csv(request: Request, game_system: str = Query(default=DEFA
                 i.acquired_on,
                 i.notes,
                 u.points AS current_points,
+                u.min_models AS current_min_models,
+                u.max_models AS current_max_models,
                 u.keywords AS current_keywords,
                 u.wargear_options_json AS current_wargear_options_json,
+                u.model_composition_json AS current_model_composition_json,
                 (SELECT COUNT(*) FROM inventory_images img WHERE img.inventory_item_id = i.id) AS image_count,
                 i.created_at,
                 i.updated_at
@@ -1765,6 +1819,8 @@ def export_inventory_csv(request: Request, game_system: str = Query(default=DEFA
         "acquired_on",
         "notes",
         "current_points",
+        "current_min_models",
+        "current_max_models",
         "current_keywords",
         "image_count",
         "created_at",

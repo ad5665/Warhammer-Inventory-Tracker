@@ -15,7 +15,7 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 
 - Top tabs for **40k**, **Kill Team**, and **AoS**.
 - Sync each game system separately from BSData.
-- Parse `.cat` files and import names, factions/teams, points when present, keywords, basic stats, unit/model datasheet entries, and weapon profile options where BSData exposes them.
+- Parse `.cat` files and import names, factions/teams, points when present, valid unit sizes where exposed, keywords, basic stats, unit/model datasheet entries, and weapon profile options where BSData exposes them.
 - Search imported catalogue entries and add them to your collection.
 - Add custom rows for boxed sets, kitbashes, terrain, spare models, bespoke Kill Team operatives, AoS projects, or anything not in BSData.
 - Track quantity, models owned, built count, painted count, build backlog, paint backlog, storage location, and notes.
@@ -200,7 +200,7 @@ Main endpoints:
 
 ## Data model notes
 
-`bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles discovered in the `.cat` XML. `inventory_items` contains your own collection, scoped by `game_system` and, when auth is enabled, `owner_user_id`. `inventory_copies` stores one child record per inventory quantity, including per-copy base number, wargear selections, location, notes, and photos. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
+`bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles and `model_composition_json` for model-specific unit composition discovered in the `.cat` XML. `inventory_items` contains your own collection, scoped by `game_system` and, when auth is enabled, `owner_user_id`. `inventory_copies` stores one child record per inventory quantity, including per-copy base number, wargear selections, location, notes, and photos. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
 
 Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`, or `/app/data/uploads/inventory/{inventory_item_id}/` in Docker. They are served locally by the app under `/uploads/...` and are not sent anywhere.
 

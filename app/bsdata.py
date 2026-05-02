@@ -84,6 +84,15 @@ class WargearOption:
 
 
 @dataclass
+class ModelCompositionEntry:
+    key: str
+    name: str
+    min_models: int | None = None
+    max_models: int | None = None
+    wargear_options: list[WargearOption] = field(default_factory=list)
+
+
+@dataclass
 class ParsedUnit:
     bs_id: str
     name: str
@@ -92,9 +101,12 @@ class ParsedUnit:
     game_system: str = DEFAULT_GAME_SYSTEM
     entry_type: str | None = None
     points: float | None = None
+    min_models: int | None = None
+    max_models: int | None = None
     keywords: list[str] = field(default_factory=list)
     stats: dict[str, str] = field(default_factory=dict)
     wargear_options: list[WargearOption] = field(default_factory=list)
+    model_composition: list[ModelCompositionEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -251,6 +263,238 @@ def _direct_cost(entry: ET.Element) -> float | None:
     return _point_cost(candidates)
 
 
+@dataclass(frozen=True)
+class _UnitSize:
+    min_models: int
+    max_models: int | None
+
+
+def _constraint_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    if parsed < 0 or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def _selection_constraints(entry: ET.Element) -> tuple[int | None, int | None]:
+    minimum: int | None = None
+    maximum: int | None = None
+    for constraints_node in _children(entry, "constraints"):
+        for constraint in _children(constraints_node, "constraint"):
+            if (constraint.attrib.get("field") or "").lower() != "selections":
+                continue
+            if (constraint.attrib.get("scope") or "").lower() != "parent":
+                continue
+            value = _constraint_int(constraint.attrib.get("value"))
+            if value is None:
+                continue
+            constraint_type = (constraint.attrib.get("type") or "").lower()
+            if constraint_type == "min":
+                minimum = value if minimum is None else max(minimum, value)
+            elif constraint_type == "max":
+                maximum = value if maximum is None else min(maximum, value)
+    return minimum, maximum
+
+
+_UNIT_SIZE_RANGE_RE = re.compile(r"(?<![\w])(\d+)\s*(?:-|\u2013|\u2014|\bto\b)\s*(\d+)(?![\w])", re.IGNORECASE)
+_UNIT_SIZE_SINGLE_RE = re.compile(r"(?<![\w-])(\d+)(?![\w-])")
+_UNIT_SIZE_PREFIX_RE = re.compile(
+    r"^\s*\d+\s*(?:(?:-|\u2013|\u2014|\bto\b)\s*\d+)?\s+",
+    re.IGNORECASE,
+)
+_COMMAND_MODEL_RE = re.compile(
+    r"\b(?:aspiring champion|champion|sergeant|nob|leader|pack leader|superior|prime|alpha|boss)\b",
+    re.IGNORECASE,
+)
+
+
+def _size_from_name(name: str) -> _UnitSize | None:
+    cleaned = _clean_text(name)
+    if not cleaned:
+        return None
+
+    ranges: list[tuple[int, int, tuple[int, int]]] = []
+    consumed: list[tuple[int, int]] = []
+    for match in _UNIT_SIZE_RANGE_RE.finditer(cleaned):
+        low = _constraint_int(match.group(1))
+        high = _constraint_int(match.group(2))
+        if low is None or high is None or low > high:
+            continue
+        ranges.append((low, high, match.span()))
+        consumed.append(match.span())
+
+    singles: list[int] = []
+    for match in _UNIT_SIZE_SINGLE_RE.finditer(cleaned):
+        if any(start <= match.start() and match.end() <= end for start, end in consumed):
+            continue
+        value = _constraint_int(match.group(1))
+        if value is not None:
+            singles.append(value)
+
+    if not ranges and not singles:
+        return None
+
+    minimum = sum(low for low, _, _ in ranges) + sum(singles)
+    maximum = sum(high for _, high, _ in ranges) + sum(singles)
+    if minimum <= 0 or maximum <= 0:
+        return None
+    return _UnitSize(minimum, maximum)
+
+
+def _composition_name(name: str) -> str:
+    cleaned = _clean_text(name)
+    without_count = _clean_text(_UNIT_SIZE_PREFIX_RE.sub("", cleaned, count=1))
+    return without_count or cleaned
+
+
+def _component_key(name: str, attrs: dict[str, str], min_models: int | None, max_models: int | None) -> str:
+    raw_id = attrs.get("id") or attrs.get("targetId") or ""
+    base = f"{raw_id}:{name}:{min_models}:{max_models}".lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if len(slug) > 44:
+        slug = slug[:44].strip("-")
+    digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:8]
+    return f"{slug or 'model'}-{digest}"
+
+
+def _is_command_model_name(name: str) -> bool:
+    return bool(_COMMAND_MODEL_RE.search(name))
+
+
+def _direct_selection_children(entry: ET.Element) -> list[ET.Element]:
+    children: list[ET.Element] = []
+    for container_name in ("selectionEntries", "selectionEntryGroups", "entryLinks"):
+        for container in _children(entry, container_name):
+            for child in list(container):
+                if _local_name(child.tag) in {"selectionEntry", "selectionEntryGroup", "entryLink"}:
+                    children.append(child)
+    return children
+
+
+def _entry_group_id_index(root: ET.Element) -> dict[str, ET.Element]:
+    indexed: dict[str, ET.Element] = {}
+    for node in root.iter():
+        if _local_name(node.tag) != "selectionEntryGroup":
+            continue
+        node_id = node.attrib.get("id")
+        if node_id and node_id not in indexed:
+            indexed[node_id] = node
+    return indexed
+
+
+def _resolve_selection_reference(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+) -> ET.Element:
+    if _local_name(entry.tag) != "entryLink":
+        return entry
+    target_id = entry.attrib.get("targetId") or ""
+    target = group_index.get(target_id)
+    if target is not None:
+        return target
+    target = selection_index.get(target_id)
+    return target if target is not None else entry
+
+
+def _contains_model_entry(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    visited: set[str] | None = None,
+) -> bool:
+    visited = visited or set()
+    for node in entry.iter():
+        local = _local_name(node.tag)
+        if local == "selectionEntry" and (node.attrib.get("type") or "").lower().strip() == "model":
+            return True
+        if local == "entryLink":
+            target_id = node.attrib.get("targetId") or ""
+            if not target_id or target_id in visited:
+                continue
+            target = group_index.get(target_id)
+            if target is None:
+                target = selection_index.get(target_id)
+            if target is None:
+                continue
+            target_type = (target.attrib.get("type") or "").lower().strip()
+            if target_type == "model" or _contains_model_entry(
+                target,
+                selection_index,
+                group_index,
+                visited={*visited, target_id},
+            ):
+                return True
+    return False
+
+
+def _unit_size_for_entry(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    *,
+    top_level: bool = False,
+    visited: set[str] | None = None,
+) -> _UnitSize | None:
+    visited = visited or set()
+    local = _local_name(entry.tag)
+
+    if local == "entryLink":
+        target_id = entry.attrib.get("targetId") or ""
+        target = group_index.get(target_id)
+        if target is None:
+            target = selection_index.get(target_id)
+        if target is None:
+            return None
+        if target_id in visited:
+            return None
+        return _unit_size_for_entry(
+            target,
+            selection_index,
+            group_index,
+            top_level=top_level,
+            visited={*visited, target_id},
+        )
+
+    entry_type = (entry.attrib.get("type") or "").lower().strip()
+    if local == "selectionEntry" and entry_type == "model":
+        if top_level:
+            return _UnitSize(1, 1)
+        minimum, maximum = _selection_constraints(entry)
+        return _UnitSize(minimum or 0, maximum if maximum is not None else 1)
+
+    if local == "selectionEntryGroup":
+        if not _contains_model_entry(entry, selection_index, group_index):
+            return None
+        minimum, maximum = _selection_constraints(entry)
+        if minimum is not None or maximum is not None:
+            return _UnitSize(minimum or 0, maximum)
+        named_size = _size_from_name(entry.attrib.get("name") or "")
+        if named_size is not None:
+            return named_size
+
+    child_sizes = [
+        size
+        for child in _direct_selection_children(entry)
+        if (size := _unit_size_for_entry(child, selection_index, group_index, visited=visited)) is not None
+    ]
+    if not child_sizes:
+        return None
+
+    minimum = sum(size.min_models for size in child_sizes)
+    maximum = None if any(size.max_models is None for size in child_sizes) else sum(
+        size.max_models or 0 for size in child_sizes
+    )
+    if minimum == 0 and (maximum is None or maximum == 0):
+        return None
+    return _UnitSize(minimum, maximum)
+
+
 def _category_keywords(entry: ET.Element) -> list[str]:
     ignore = {
         "configuration",
@@ -334,7 +578,7 @@ def _is_weapon_profile(profile: ET.Element) -> bool:
 def _clean_weapon_name(name: str) -> str:
     cleaned = _clean_text(name)
     # BattleScribe files may prefix Kill Team ranged/melee profiles with icons.
-    cleaned = cleaned.lstrip(" \t\r\n\u2316\u2694*-:.")
+    cleaned = cleaned.lstrip(" \t\r\n\u2316\u2694\u27a4*-:.")
     return _clean_text(cleaned)
 
 
@@ -411,10 +655,163 @@ def _collect_wargear_options(
     return _merge_wargear_option_lists(options)
 
 
+def _component_size(entry: ET.Element, selection_index: dict[str, ET.Element], group_index: dict[str, ET.Element]) -> _UnitSize | None:
+    if _local_name(entry.tag) == "selectionEntry" and (entry.attrib.get("type") or "").lower().strip() == "model":
+        minimum, maximum = _selection_constraints(entry)
+        if minimum is None and maximum is None:
+            return _UnitSize(1, 1)
+        return _UnitSize(minimum or 0, maximum)
+    return _unit_size_for_entry(entry, selection_index, group_index)
+
+
+def _component_from_model(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+) -> ModelCompositionEntry | None:
+    size = _component_size(entry, selection_index, group_index)
+    name = _composition_name(entry.attrib.get("name") or "")
+    if not name:
+        return None
+    return ModelCompositionEntry(
+        key=_component_key(name, entry.attrib, size.min_models if size else None, size.max_models if size else None),
+        name=name,
+        min_models=size.min_models if size else None,
+        max_models=size.max_models if size else None,
+        wargear_options=_collect_wargear_options(entry, selection_index, profile_index),
+    )
+
+
+def _collect_component_wargear_from_children(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+    excluded: set[ET.Element] | None = None,
+) -> list[WargearOption]:
+    excluded = excluded or set()
+    options: list[WargearOption] = []
+    for child in _direct_selection_children(entry):
+        target = _resolve_selection_reference(child, selection_index, group_index)
+        if child in excluded or target in excluded:
+            continue
+        options.extend(_collect_wargear_options(child, selection_index, profile_index))
+        if target is not child:
+            options.extend(_collect_wargear_options(target, selection_index, profile_index))
+    return _merge_wargear_option_lists(options)
+
+
+def _component_from_group(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+) -> list[ModelCompositionEntry]:
+    size = _component_size(entry, selection_index, group_index)
+    if size is None:
+        return []
+
+    direct_model_children: list[ET.Element] = []
+    for child in _direct_selection_children(entry):
+        target = _resolve_selection_reference(child, selection_index, group_index)
+        if _local_name(target.tag) != "selectionEntry":
+            continue
+        if (target.attrib.get("type") or "").lower().strip() == "model":
+            direct_model_children.append(target)
+    command_children = [
+        child
+        for child in direct_model_children
+        if _is_command_model_name(child.attrib.get("name") or "")
+        and (child_size := _component_size(child, selection_index, group_index)) is not None
+        and child_size.min_models == 1
+        and child_size.max_models == 1
+    ]
+
+    components = [
+        component
+        for child in command_children
+        if (component := _component_from_model(child, selection_index, group_index, profile_index)) is not None
+    ]
+
+    command_min = sum(component.min_models or 0 for component in components)
+    command_max = sum(component.max_models or 0 for component in components)
+    remaining_min = max(size.min_models - command_min, 0)
+    remaining_max = None if size.max_models is None else max(size.max_models - command_max, 0)
+
+    if components and remaining_min == 0 and (remaining_max is None or remaining_max == 0):
+        return components
+
+    name = _composition_name(entry.attrib.get("name") or "")
+    if not name:
+        return components
+    excluded = set(command_children)
+    group_options = (
+        _collect_component_wargear_from_children(entry, selection_index, group_index, profile_index, excluded)
+        if excluded
+        else _collect_wargear_options(entry, selection_index, profile_index)
+    )
+    components.append(
+        ModelCompositionEntry(
+            key=_component_key(name, entry.attrib, remaining_min, remaining_max),
+            name=name,
+            min_models=remaining_min,
+            max_models=remaining_max,
+            wargear_options=group_options,
+        )
+    )
+    return components
+
+
+def _model_composition(
+    entry: ET.Element,
+    selection_index: dict[str, ET.Element],
+    group_index: dict[str, ET.Element],
+    profile_index: dict[str, ET.Element],
+) -> list[ModelCompositionEntry]:
+    components: list[ModelCompositionEntry] = []
+    for child in _direct_selection_children(entry):
+        target = _resolve_selection_reference(child, selection_index, group_index)
+        local = _local_name(target.tag)
+        entry_type = (target.attrib.get("type") or "").lower().strip()
+        if local == "selectionEntry" and entry_type == "model":
+            component = _component_from_model(target, selection_index, group_index, profile_index)
+            if component is not None:
+                components.append(component)
+        elif local == "selectionEntryGroup" and _contains_model_entry(target, selection_index, group_index):
+            components.extend(_component_from_group(target, selection_index, group_index, profile_index))
+
+    seen: set[str] = set()
+    unique_components: list[ModelCompositionEntry] = []
+    for component in components:
+        if component.key in seen:
+            continue
+        seen.add(component.key)
+        unique_components.append(component)
+    return unique_components
+
+
 def _wargear_options_json(options: list[WargearOption]) -> str:
     payload = [
         {"key": option.key, "name": option.name, "kind": option.kind, "stats": option.stats}
         for option in options
+    ]
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _model_composition_json(components: list[ModelCompositionEntry]) -> str:
+    payload = [
+        {
+            "key": component.key,
+            "name": component.name,
+            "min_models": component.min_models,
+            "max_models": component.max_models,
+            "wargear_options": [
+                {"key": option.key, "name": option.name, "kind": option.kind, "stats": option.stats}
+                for option in component.wargear_options
+            ],
+        }
+        for component in components
     ]
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -499,6 +896,7 @@ def parse_catalogue_file(path: Path, game_system: str = DEFAULT_GAME_SYSTEM) -> 
     seen_keys: set[tuple[str, str, str]] = set()
     seen_names: set[tuple[str, str, str]] = set()
     id_index = _entry_id_index(root)
+    group_index = _entry_group_id_index(root)
     profile_index = _profile_id_index(root)
     parents = _parent_map(root)
 
@@ -541,6 +939,12 @@ def parse_catalogue_file(path: Path, game_system: str = DEFAULT_GAME_SYSTEM) -> 
 
         keywords = _category_keywords(data_entry) or _category_keywords(source_entry)
         stats = _unit_stats(data_entry) or _unit_stats(source_entry)
+        unit_size = _unit_size_for_entry(data_entry, id_index, group_index, top_level=True)
+        if unit_size is None:
+            unit_size = _unit_size_for_entry(source_entry, id_index, group_index, top_level=True)
+        model_composition = _model_composition(data_entry, id_index, group_index, profile_index)
+        if not model_composition:
+            model_composition = _model_composition(source_entry, id_index, group_index, profile_index)
         wargear_options = _merge_wargear_option_lists(
             _collect_wargear_options(data_entry, id_index, profile_index),
             _collect_wargear_options(source_entry, id_index, profile_index),
@@ -558,9 +962,12 @@ def parse_catalogue_file(path: Path, game_system: str = DEFAULT_GAME_SYSTEM) -> 
                 game_system=config.id,
                 entry_type=entry_type,
                 points=points,
+                min_models=unit_size.min_models if unit_size is not None else None,
+                max_models=unit_size.max_models if unit_size is not None else None,
                 keywords=keywords,
                 stats=stats,
                 wargear_options=wargear_options,
+                model_composition=model_composition,
             )
         )
 
@@ -585,9 +992,12 @@ def _upsert_unit(conn: Any, unit: ParsedUnit, imported_at: str) -> None:
         unit.catalogue_file,
         unit.entry_type,
         unit.points,
+        unit.min_models,
+        unit.max_models,
         ", ".join(unit.keywords),
         json.dumps(unit.stats, ensure_ascii=False, sort_keys=True),
         _wargear_options_json(unit.wargear_options),
+        _model_composition_json(unit.model_composition),
         imported_at,
     )
 
@@ -602,9 +1012,12 @@ def _upsert_unit(conn: Any, unit: ParsedUnit, imported_at: str) -> None:
                 catalogue_file = ?,
                 entry_type = ?,
                 points = ?,
+                min_models = ?,
+                max_models = ?,
                 keywords = ?,
                 stats_json = ?,
                 wargear_options_json = ?,
+                model_composition_json = ?,
                 active = 1,
                 imported_at = ?
             WHERE id = ?
@@ -617,8 +1030,9 @@ def _upsert_unit(conn: Any, unit: ParsedUnit, imported_at: str) -> None:
         """
         INSERT INTO bsd_units (
             game_system, bs_id, name, faction, catalogue_file, entry_type, points,
-            keywords, stats_json, wargear_options_json, active, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            min_models, max_models, keywords, stats_json, wargear_options_json,
+            model_composition_json, active, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         """,
         values,
     )

@@ -62,9 +62,12 @@ def init_db() -> None:
                 catalogue_file TEXT NOT NULL,
                 entry_type TEXT,
                 points REAL,
+                min_models INTEGER,
+                max_models INTEGER,
                 keywords TEXT,
                 stats_json TEXT,
                 wargear_options_json TEXT,
+                model_composition_json TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 imported_at TEXT NOT NULL,
                 UNIQUE(game_system, bs_id, catalogue_file)
@@ -159,9 +162,12 @@ def init_db() -> None:
         # Lightweight migrations for databases created by earlier versions of
         # the app. SQLite can add simple columns without rebuilding the table.
         _ensure_column(conn, "bsd_units", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
+        _ensure_column(conn, "bsd_units", "min_models", "min_models INTEGER")
+        _ensure_column(conn, "bsd_units", "max_models", "max_models INTEGER")
         _ensure_column(conn, "inventory_items", "owner_user_id", "owner_user_id INTEGER")
         _ensure_column(conn, "inventory_items", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
         _ensure_column(conn, "bsd_units", "wargear_options_json", "wargear_options_json TEXT")
+        _ensure_column(conn, "bsd_units", "model_composition_json", "model_composition_json TEXT")
         _ensure_column(conn, "inventory_items", "wargear", "wargear TEXT")
         _ensure_column(conn, "inventory_items", "wargear_selections_json", "wargear_selections_json TEXT")
         _ensure_column(conn, "inventory_items", "model_number", "model_number TEXT")
