@@ -7,6 +7,8 @@ const state = {
   lastUnitQuery: "",
 };
 
+const autosaveTimers = new Map();
+
 const fallbackSystems = [
   { id: "wh40k_10e", label: "Warhammer 40,000 10th Edition", short_label: "40k", catalogue_word: "units/models" },
   { id: "kill_team", label: "Warhammer 40,000: Kill Team", short_label: "Kill Team", catalogue_word: "teams/operatives" },
@@ -303,6 +305,24 @@ function collectWargearSelections(row) {
   return selections;
 }
 
+function rowNumberField(row, field) {
+  const value = Number(row.querySelector(`[data-field="${field}"]`)?.value || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function updateRowBacklog(row) {
+  const modelsOwned = rowNumberField(row, "models_owned");
+  const builtCount = rowNumberField(row, "built_count");
+  const paintedCount = rowNumberField(row, "painted_count");
+  const buildBacklog = Math.max(modelsOwned - builtCount, 0);
+  const paintBacklog = Math.max(modelsOwned - paintedCount, 0);
+
+  const buildNode = row.querySelector('[data-backlog="build"]');
+  const paintNode = row.querySelector('[data-backlog="paint"]');
+  if (buildNode) buildNode.textContent = `${buildBacklog} build`;
+  if (paintNode) paintNode.textContent = `${paintBacklog} paint`;
+}
+
 function renderPhotos(item) {
   const images = item.images || [];
   const gallery = images.length ? `
@@ -361,7 +381,7 @@ function renderInventory() {
         <td>${numberInput(item, "models_owned")}</td>
         <td>${numberInput(item, "built_count")}</td>
         <td>${numberInput(item, "painted_count")}</td>
-        <td><span class="backlog">${item.unbuilt_count} build</span><br><span class="backlog">${item.unpainted_count} paint</span></td>
+        <td><span class="backlog" data-backlog="build">${item.unbuilt_count} build</span><br><span class="backlog" data-backlog="paint">${item.unpainted_count} paint</span></td>
         <td>${textInput(item, "model_number", "Base #")}</td>
         <td>${renderWargear(item)}</td>
         <td>${textInput(item, "storage_location", "Shelf / case")}</td>
@@ -369,7 +389,7 @@ function renderInventory() {
         <td>${textareaInput(item, "notes", 3, "Notes")}</td>
         <td>
           <div class="actions">
-            <button class="secondary" onclick="saveItem(${item.id})">Save</button>
+            <button class="secondary" onclick="cloneItem(${item.id})">Clone</button>
             <button class="danger" onclick="deleteItem(${item.id})">Delete</button>
           </div>
         </td>
@@ -410,14 +430,43 @@ function collectItemPayload(itemId) {
   };
 }
 
-async function saveItem(itemId) {
+async function autosaveItem(itemId, payload) {
   try {
     await api(`/api/inventory/${itemId}`, {
       method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    toast(`Autosave failed: ${error.message}`, "error");
+  }
+}
+
+function scheduleAutosave(row) {
+  const itemId = Number(row.dataset.id || 0);
+  if (!itemId) return;
+  let payload;
+  try {
+    payload = collectItemPayload(itemId);
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  clearTimeout(autosaveTimers.get(itemId));
+  autosaveTimers.set(itemId, setTimeout(() => {
+    autosaveTimers.delete(itemId);
+    autosaveItem(itemId, payload);
+  }, 650));
+}
+
+async function cloneItem(itemId) {
+  const original = state.inventory.find(item => item.id === itemId);
+  try {
+    await api("/api/inventory", {
+      method: "POST",
       body: JSON.stringify(collectItemPayload(itemId)),
     });
-    toast("Inventory item saved.");
-    await loadInventory();
+    toast(`${original?.unit_name || "Inventory item"} cloned.`);
+    await Promise.all([loadInventory(), loadStatus()]);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -517,6 +566,20 @@ async function setGameSystem(gameSystem) {
 function wireEvents() {
   el("sync-btn").addEventListener("click", syncBsdata);
   el("faction-filter").addEventListener("change", searchUnits);
+  el("inventory-body").addEventListener("input", (event) => {
+    const target = event.target;
+    const row = target.closest("tr[data-id]");
+    if (!row || (!target.matches("[data-field]") && !target.matches("[data-wargear-key]"))) return;
+    updateRowBacklog(row);
+    scheduleAutosave(row);
+  });
+  el("inventory-body").addEventListener("change", (event) => {
+    const target = event.target;
+    const row = target.closest("tr[data-id]");
+    if (!row || (!target.matches("[data-field]") && !target.matches("[data-wargear-key]"))) return;
+    updateRowBacklog(row);
+    scheduleAutosave(row);
+  });
   el("game-tabs").addEventListener("click", (event) => {
     const button = event.target.closest("[data-game]");
     if (!button) return;
@@ -551,7 +614,7 @@ function wireEvents() {
 }
 
 window.addUnit = addUnit;
-window.saveItem = saveItem;
+window.cloneItem = cloneItem;
 window.deleteItem = deleteItem;
 window.uploadImage = uploadImage;
 window.deleteImage = deleteImage;
