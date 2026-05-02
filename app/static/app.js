@@ -805,10 +805,10 @@ function renderCopyCell(item) {
       </button>
     `;
   }
-  return renderCopies(item);
+  return `<div class="row-sub">${esc(copyBoxLabel(item))} below</div>`;
 }
 
-function renderInventoryModelComposition(item) {
+function renderInventoryModelCompositionRow(item) {
   const composition = renderModelComposition(item, {
     className: "inventory-composition",
     wargearLimit: 24,
@@ -816,9 +816,20 @@ function renderInventoryModelComposition(item) {
   if (!composition) return "";
 
   return `
-    <tr class="inventory-detail-row">
+    <tr class="inventory-composition-row">
       <td colspan="7">
         ${composition}
+      </td>
+      <td colspan="2"></td>
+    </tr>
+  `;
+}
+
+function renderInventoryCopiesRow(item) {
+  return `
+    <tr data-id="${item.id}" class="inventory-copy-row">
+      <td colspan="9" class="copy-detail-cell">
+        ${renderCopies(item)}
       </td>
     </tr>
   `;
@@ -874,10 +885,9 @@ function renderInventory() {
     const unitSize = unitSizeText(item);
     const size = unitSize ? `<div class="row-sub">Valid size: ${esc(unitSize)}</div>` : "";
     const collapsed = isInventoryItemCollapsed(item.id);
-    const compositionRow = collapsed ? "" : renderInventoryModelComposition(item);
-    const rowSpan = compositionRow ? ' rowspan="2"' : "";
+    const detailRows = collapsed ? "" : `${renderInventoryModelCompositionRow(item)}${renderInventoryCopiesRow(item)}`;
     return `
-      <tr data-id="${item.id}" class="${[collapsed ? "inventory-row-collapsed" : "", compositionRow ? "inventory-row-has-detail" : ""].filter(Boolean).join(" ")}">
+      <tr data-id="${item.id}" class="${[collapsed ? "inventory-row-collapsed" : "", detailRows ? "inventory-row-has-detail" : ""].filter(Boolean).join(" ")}">
         <td>
           <div class="row-heading">
             <button
@@ -902,15 +912,15 @@ function renderInventory() {
         <td>${numberInput(item, "built_count")}</td>
         <td>${numberInput(item, "painted_count")}</td>
         <td><span class="backlog" data-backlog="build">${item.unbuilt_count} build</span><br><span class="backlog" data-backlog="paint">${item.unpainted_count} paint</span></td>
-        <td class="copy-cell"${rowSpan}>${renderCopyCell(item)}</td>
-        <td${rowSpan}>
+        <td class="copy-cell">${renderCopyCell(item)}</td>
+        <td>
           <div class="actions">
             <button class="secondary" onclick="cloneItem(${item.id})">Clone</button>
             <button class="danger" onclick="deleteItem(${item.id})">Delete</button>
           </div>
         </td>
       </tr>
-      ${compositionRow}
+      ${detailRows}
     `;
   }).join("");
   renderInventorySummary();

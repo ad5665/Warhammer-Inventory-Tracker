@@ -236,7 +236,8 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   margin-top: 0;
 }
-.inventory-detail-row td {
+.inventory-composition-row td,
+.inventory-copy-row td {
   padding-top: 0;
 }
 .inventory-row-has-detail > td:not([rowspan]) {
@@ -329,6 +330,9 @@ td textarea { min-width: 220px; }
 .inventory-row-collapsed .copy-cell {
   min-width: 240px;
 }
+.copy-detail-cell {
+  min-width: 0;
+}
 .collapsed-copy-summary {
   width: 100%;
   justify-content: flex-start;
@@ -341,12 +345,15 @@ td textarea { min-width: 220px; }
   font-size: 0.82rem;
 }
 .copy-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  display: flex;
   gap: 12px;
+  align-items: start;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 .copy-card {
   display: grid;
+  flex: 0 0 390px;
   gap: 10px;
   padding: 12px;
   border: 1px solid var(--border);
