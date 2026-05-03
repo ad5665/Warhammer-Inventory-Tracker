@@ -49,6 +49,76 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {ddl}")
 
 
+def _safe_count(value: object) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
+def _distributed_counts(total: int, copies: list[sqlite3.Row]) -> list[int]:
+    remaining = max(total, 0)
+    values: list[int] = []
+    for copy in copies:
+        if remaining <= 0:
+            values.append(0)
+            continue
+        capacity = _safe_count(copy["models_owned"])
+        value = min(capacity, remaining) if capacity > 0 else remaining
+        values.append(value)
+        remaining -= value
+    return values
+
+
+def _backfill_copy_progress(conn: sqlite3.Connection) -> None:
+    items = conn.execute(
+        """
+        SELECT id, built_count, painted_count
+        FROM inventory_items
+        WHERE COALESCE(built_count, 0) > 0
+           OR COALESCE(painted_count, 0) > 0
+        """
+    ).fetchall()
+    for item in items:
+        copies = conn.execute(
+            """
+            SELECT id, models_owned, built_count, painted_count
+            FROM inventory_copies
+            WHERE inventory_item_id = ?
+            ORDER BY copy_number
+            """,
+            (item["id"],),
+        ).fetchall()
+        if not copies:
+            continue
+
+        built_values: list[int] | None = None
+        painted_values: list[int] | None = None
+        if _safe_count(item["built_count"]) > 0 and sum(_safe_count(copy["built_count"]) for copy in copies) == 0:
+            built_values = _distributed_counts(_safe_count(item["built_count"]), copies)
+        if _safe_count(item["painted_count"]) > 0 and sum(_safe_count(copy["painted_count"]) for copy in copies) == 0:
+            painted_values = _distributed_counts(_safe_count(item["painted_count"]), copies)
+
+        if built_values is None and painted_values is None:
+            continue
+
+        for index, copy in enumerate(copies):
+            conn.execute(
+                """
+                UPDATE inventory_copies
+                SET built_count = COALESCE(?, built_count),
+                    painted_count = COALESCE(?, painted_count)
+                WHERE id = ?
+                """,
+                (
+                    built_values[index] if built_values is not None else None,
+                    painted_values[index] if painted_values is not None else None,
+                    copy["id"],
+                ),
+            )
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(
@@ -114,6 +184,8 @@ def init_db() -> None:
                 inventory_item_id INTEGER NOT NULL,
                 copy_number INTEGER NOT NULL CHECK(copy_number >= 1),
                 models_owned INTEGER NOT NULL DEFAULT 0 CHECK(models_owned >= 0),
+                built_count INTEGER NOT NULL DEFAULT 0 CHECK(built_count >= 0),
+                painted_count INTEGER NOT NULL DEFAULT 0 CHECK(painted_count >= 0),
                 model_number TEXT,
                 wargear TEXT,
                 wargear_selections_json TEXT,
@@ -173,6 +245,8 @@ def init_db() -> None:
         _ensure_column(conn, "inventory_items", "wargear_selections_json", "wargear_selections_json TEXT")
         _ensure_column(conn, "inventory_items", "model_number", "model_number TEXT")
         _ensure_column(conn, "inventory_copies", "models_owned", "models_owned INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "inventory_copies", "built_count", "built_count INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "inventory_copies", "painted_count", "painted_count INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "inventory_images", "inventory_copy_id", "inventory_copy_id INTEGER")
         _ensure_column(conn, "import_runs", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
 
@@ -187,6 +261,7 @@ def init_db() -> None:
             WHERE COALESCE(models_owned, 0) = 0
             """
         )
+        _backfill_copy_progress(conn)
 
         conn.executescript(
             """

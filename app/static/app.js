@@ -649,11 +649,6 @@ function collectCopyWargearSelections(card) {
   return selections;
 }
 
-function rowNumberField(row, field) {
-  const value = Number(row.querySelector(`[data-field="${field}"]`)?.value || 0);
-  return Number.isFinite(value) ? value : 0;
-}
-
 function itemQuantity(item, row = null) {
   const rowValue = row?.querySelector('[data-field="quantity"]')?.value;
   const value = rowValue !== undefined ? Number(rowValue || 0) : Number(item.quantity || 0);
@@ -679,12 +674,27 @@ function itemModelCount(item, row = null) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function copyNumberField(copy, field) {
+  const input = document.querySelector(`[data-copy-id="${copy.id}"] [data-copy-field="${field}"]`);
+  const value = input ? Number(input.value || 0) : Number(copy[field] || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function itemCopyTotal(item, field) {
+  const copies = item.copies || [];
+  if (!copies.length) {
+    const value = Number(item[field] || 0);
+    return Number.isFinite(value) ? value : 0;
+  }
+  return copies.reduce((sum, copy) => sum + copyNumberField(copy, field), 0);
+}
+
 function updateRowBacklog(row) {
   const itemId = Number(row.dataset.id || 0);
   const item = state.inventory.find(candidate => candidate.id === itemId);
   const modelsOwned = item ? itemModelCount(item, row) : 0;
-  const builtCount = rowNumberField(row, "built_count");
-  const paintedCount = rowNumberField(row, "painted_count");
+  const builtCount = item ? itemCopyTotal(item, "built_count") : 0;
+  const paintedCount = item ? itemCopyTotal(item, "painted_count") : 0;
   const buildBacklog = Math.max(modelsOwned - builtCount, 0);
   const paintBacklog = Math.max(modelsOwned - paintedCount, 0);
 
@@ -704,8 +714,8 @@ function inventorySummaryRecord(item) {
 
   const quantity = numberField("quantity");
   const modelsOwned = itemModelCount(item, row);
-  const builtCount = numberField("built_count");
-  const paintedCount = numberField("painted_count");
+  const builtCount = itemCopyTotal(item, "built_count");
+  const paintedCount = itemCopyTotal(item, "painted_count");
   const points = Number(item.current_points ?? 0);
 
   return {
@@ -930,6 +940,14 @@ function renderCopies(item) {
               </label>
             ` : ""}
             <label>
+              Built
+              ${copyNumberInput(copy, "built_count")}
+            </label>
+            <label>
+              Painted
+              ${copyNumberInput(copy, "painted_count")}
+            </label>
+            <label>
               Base #
               ${copyTextInput(copy, "model_number", "Base #")}
             </label>
@@ -969,7 +987,6 @@ function renderInventoryModelCompositionRow(item) {
       <td colspan="5">
         ${composition}
       </td>
-      <td colspan="2"></td>
     </tr>
   `;
 }
@@ -977,7 +994,7 @@ function renderInventoryModelCompositionRow(item) {
 function renderInventoryCopiesRow(item) {
   return `
     <tr data-id="${item.id}" class="inventory-copy-row">
-      <td colspan="7" class="copy-detail-cell">
+      <td colspan="5" class="copy-detail-cell">
         ${renderCopies(item)}
       </td>
     </tr>
@@ -1023,7 +1040,7 @@ function renderPhotos(item) {
 function renderInventory() {
   const body = el("inventory-body");
   if (!state.inventory.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="empty-cell">No inventory yet. Search a catalogue entry or add a custom item.</td></tr>';
     renderInventoryFactionOptions();
     renderInventorySummary();
     return;
@@ -1037,8 +1054,8 @@ function renderInventory() {
     const collapsed = isInventoryItemCollapsed(item.id);
     const detailRows = collapsed ? "" : `${renderInventoryModelCompositionRow(item)}${renderInventoryCopiesRow(item)}`;
     const modelsOwned = itemModelCount(item);
-    const unbuiltCount = Math.max(modelsOwned - Number(item.built_count || 0), 0);
-    const unpaintedCount = Math.max(modelsOwned - Number(item.painted_count || 0), 0);
+    const unbuiltCount = Math.max(modelsOwned - itemCopyTotal(item, "built_count"), 0);
+    const unpaintedCount = Math.max(modelsOwned - itemCopyTotal(item, "painted_count"), 0);
     const customLabel = item.unit_id ? "" : " (custom)";
     return `
       <tr data-id="${item.id}" class="${[collapsed ? "inventory-row-collapsed" : "", detailRows ? "inventory-row-has-detail" : ""].filter(Boolean).join(" ")}">
@@ -1061,8 +1078,6 @@ function renderInventory() {
         </td>
         <td>${textInput(item, "faction", "Faction / army / team")}</td>
         <td>${numberInput(item, "quantity")}</td>
-        <td>${numberInput(item, "built_count")}</td>
-        <td>${numberInput(item, "painted_count")}</td>
         <td><span class="backlog" data-backlog="build">${unbuiltCount} build</span><br><span class="backlog" data-backlog="paint">${unpaintedCount} paint</span></td>
         <td>
           <div class="actions">
@@ -1099,8 +1114,8 @@ function collectItemPayload(itemId) {
     faction: field("faction"),
     quantity: numberField("quantity"),
     models_owned: itemModelCount(original, row),
-    built_count: numberField("built_count"),
-    painted_count: numberField("painted_count"),
+    built_count: itemCopyTotal(original, "built_count"),
+    painted_count: itemCopyTotal(original, "painted_count"),
     wargear: original.wargear,
     wargear_selections: original.wargear_selections || {},
     model_number: original.model_number,
@@ -1162,6 +1177,8 @@ function collectCopyPayload(copyId) {
   if (modelsInput) {
     payload.models_owned = Number(modelsInput.value || 0);
   }
+  payload.built_count = Number(field("built_count") || 0);
+  payload.painted_count = Number(field("painted_count") || 0);
   return payload;
 }
 
@@ -1354,7 +1371,7 @@ function wireEvents() {
     if (copyCard && (target.matches("[data-copy-field]") || target.matches("[data-copy-wargear-key]"))) {
       const itemId = Number(copyCard.closest("tr[data-id]")?.dataset.id || 0);
       const row = itemId ? document.querySelector(`tr[data-id="${itemId}"]`) : null;
-      if (row && target.matches('[data-copy-field="models_owned"]')) {
+      if (row && target.matches('[data-copy-field="models_owned"], [data-copy-field="built_count"], [data-copy-field="painted_count"]')) {
         updateRowBacklog(row);
         renderInventorySummary();
       }
@@ -1373,7 +1390,7 @@ function wireEvents() {
     if (copyCard && (target.matches("[data-copy-field]") || target.matches("[data-copy-wargear-key]"))) {
       const itemId = Number(copyCard.closest("tr[data-id]")?.dataset.id || 0);
       const row = itemId ? document.querySelector(`tr[data-id="${itemId}"]`) : null;
-      if (row && target.matches('[data-copy-field="models_owned"]')) {
+      if (row && target.matches('[data-copy-field="models_owned"], [data-copy-field="built_count"], [data-copy-field="painted_count"]')) {
         updateRowBacklog(row);
         renderInventorySummary();
       }

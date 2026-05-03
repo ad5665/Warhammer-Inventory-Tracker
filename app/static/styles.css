@@ -312,7 +312,7 @@ table {
 }
 .inventory-table {
   table-layout: fixed;
-  min-width: 1500px;
+  min-width: 1160px;
 }
 .inventory-table .col-unit { width: 230px; }
 .inventory-table .col-faction { width: 180px; }

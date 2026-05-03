@@ -84,6 +84,8 @@ class InventoryPayload(BaseModel):
 
 class InventoryCopyPayload(BaseModel):
     models_owned: int | None = Field(default=None, ge=0)
+    built_count: int | None = Field(default=None, ge=0)
+    painted_count: int | None = Field(default=None, ge=0)
     model_number: str | None = None
     wargear: str | None = None
     wargear_selections: dict[str, int] | None = None
@@ -990,6 +992,8 @@ def _copy_payload_data(
 ) -> dict[str, Any]:
     data = payload.model_dump()
     data["models_owned"] = _safe_optional_int(data.get("models_owned"))
+    data["built_count"] = _safe_optional_int(data.get("built_count"))
+    data["painted_count"] = _safe_optional_int(data.get("painted_count"))
     data["model_number"] = _clean_optional(data.get("model_number"))
     data["storage_location"] = _clean_optional(data.get("storage_location"))
     data["wargear"] = _clean_textarea(data.get("wargear"))
@@ -1006,15 +1010,27 @@ def _copy_payload_data(
 def _inventory_copy_dict(row: Any) -> dict[str, Any]:
     copy = dict(row)
     copy["models_owned"] = max(int(copy.get("models_owned") or 0), 0)
+    copy["built_count"] = max(int(copy.get("built_count") or 0), 0)
+    copy["painted_count"] = max(int(copy.get("painted_count") or 0), 0)
     copy["wargear_selections"] = _decode_wargear_selections(copy.pop("wargear_selections_json", None))
     copy.setdefault("images", [])
     return copy
+
+
+def _copy_progress_seed(total: Any, assigned: int, capacity: Any) -> int:
+    remaining = max(int(total or 0) - assigned, 0)
+    if remaining <= 0:
+        return 0
+    copy_capacity = max(int(capacity or 0), 0)
+    return min(copy_capacity, remaining) if copy_capacity > 0 else remaining
 
 
 def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
     if copy_number != 1:
         return {
             "models_owned": item["models_owned"],
+            "built_count": 0,
+            "painted_count": 0,
             "model_number": None,
             "wargear": None,
             "wargear_selections_json": None,
@@ -1024,6 +1040,8 @@ def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
 
     return {
         "models_owned": item["models_owned"],
+        "built_count": 0,
+        "painted_count": 0,
         "model_number": item["model_number"],
         "wargear": item["wargear"],
         "wargear_selections_json": item["wargear_selections_json"],
@@ -1032,32 +1050,81 @@ def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
     }
 
 
+def _sync_inventory_progress_from_copies(conn: Any, item_id: int, updated_at: str | None = None) -> None:
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(c.built_count), 0) AS built_count,
+            COALESCE(SUM(c.painted_count), 0) AS painted_count
+        FROM inventory_copies c
+        JOIN inventory_items i ON i.id = c.inventory_item_id
+        WHERE c.inventory_item_id = ?
+          AND c.copy_number <= i.quantity
+        """,
+        (item_id,),
+    ).fetchone()
+    built_count = max(int(row["built_count"] or 0), 0) if row else 0
+    painted_count = max(int(row["painted_count"] or 0), 0) if row else 0
+
+    if updated_at is None:
+        conn.execute(
+            """
+            UPDATE inventory_items
+            SET built_count = ?, painted_count = ?
+            WHERE id = ?
+            """,
+            (built_count, painted_count, item_id),
+        )
+        return
+
+    conn.execute(
+        """
+        UPDATE inventory_items
+        SET built_count = ?, painted_count = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (built_count, painted_count, updated_at, item_id),
+    )
+
+
 def _ensure_inventory_copies(conn: Any, item: Any) -> None:
     item_id = int(item["id"])
     quantity = max(int(item["quantity"] or 0), 0)
     existing_rows = conn.execute(
-        "SELECT copy_number FROM inventory_copies WHERE inventory_item_id = ?",
+        """
+        SELECT copy_number, models_owned, built_count, painted_count
+        FROM inventory_copies
+        WHERE inventory_item_id = ?
+        """,
         (item_id,),
     ).fetchall()
     existing_numbers = {int(row["copy_number"]) for row in existing_rows}
+    built_assigned = sum(max(int(row["built_count"] or 0), 0) for row in existing_rows)
+    painted_assigned = sum(max(int(row["painted_count"] or 0), 0) for row in existing_rows)
     now = utc_now_sql()
 
     for copy_number in range(1, quantity + 1):
         if copy_number in existing_numbers:
             continue
         seed = _copy_seed_from_item(item, copy_number if existing_numbers else copy_number)
+        seed["built_count"] = _copy_progress_seed(item["built_count"], built_assigned, seed["models_owned"])
+        seed["painted_count"] = _copy_progress_seed(item["painted_count"], painted_assigned, seed["models_owned"])
+        built_assigned += seed["built_count"]
+        painted_assigned += seed["painted_count"]
         conn.execute(
             """
             INSERT INTO inventory_copies (
-                inventory_item_id, copy_number, models_owned, model_number,
+                inventory_item_id, copy_number, models_owned, built_count, painted_count, model_number,
                 wargear, wargear_selections_json, storage_location, notes,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item_id,
                 copy_number,
                 seed["models_owned"],
+                seed["built_count"],
+                seed["painted_count"],
                 seed["model_number"],
                 seed["wargear"],
                 seed["wargear_selections_json"],
@@ -1067,6 +1134,8 @@ def _ensure_inventory_copies(conn: Any, item: Any) -> None:
                 now,
             ),
         )
+
+    _sync_inventory_progress_from_copies(conn, item_id)
 
     if quantity > 0:
         first_copy = conn.execute(
@@ -1131,6 +1200,19 @@ def _attach_copies(conn: Any, items: list[dict[str, Any]]) -> None:
         parent = by_item.get(int(copy["inventory_item_id"]))
         if parent is not None:
             parent["copies"].append(copy)
+
+
+def _apply_copy_progress_totals(items: list[dict[str, Any]]) -> None:
+    for item in items:
+        copies = item.get("copies") or []
+        if not copies:
+            continue
+        built_count = sum(max(int(copy.get("built_count") or 0), 0) for copy in copies)
+        painted_count = sum(max(int(copy.get("painted_count") or 0), 0) for copy in copies)
+        item["built_count"] = built_count
+        item["painted_count"] = painted_count
+        item["unbuilt_count"] = max(int(item.get("models_owned") or 0) - built_count, 0)
+        item["unpainted_count"] = max(int(item.get("models_owned") or 0) - painted_count, 0)
 
 
 def _attach_images(conn: Any, items: list[dict[str, Any]]) -> None:
@@ -1258,6 +1340,7 @@ def _inventory_item_response(conn: Any, item_id: int, owner_user_id: int | None)
     except json.JSONDecodeError:
         item["current_stats"] = {}
     _attach_copies(conn, [item])
+    _apply_copy_progress_totals([item])
     _attach_images(conn, [item])
     return item
 
@@ -1541,6 +1624,7 @@ def inventory(request: Request, game_system: str = Query(default=DEFAULT_GAME_SY
                 item["current_stats"] = {}
             output.append(item)
         _attach_copies(conn, output)
+        _apply_copy_progress_totals(output)
         _attach_images(conn, output)
         return output
 
@@ -1681,6 +1765,8 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
             f"""
             UPDATE inventory_copies SET
                 models_owned = COALESCE(?, models_owned),
+                built_count = COALESCE(?, built_count),
+                painted_count = COALESCE(?, painted_count),
                 model_number = ?,
                 wargear = ?,
                 wargear_selections_json = ?,
@@ -1696,6 +1782,8 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
             """,
             [
                 data["models_owned"],
+                data["built_count"],
+                data["painted_count"],
                 data["model_number"],
                 data["wargear"],
                 data["wargear_selections_json"],
@@ -1707,6 +1795,7 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
                 *owner_params,
             ],
         )
+        _sync_inventory_progress_from_copies(conn, item_id, now)
         row = conn.execute("SELECT * FROM inventory_copies WHERE id = ?", (copy_id,)).fetchone()
         copy = _inventory_copy_dict(row)
         parent = {"id": item_id, "copies": [copy], "images": []}
@@ -1864,6 +1953,16 @@ def export_inventory_csv(request: Request, game_system: str = Query(default=DEFA
     with connect() as conn:
         rows = conn.execute(
             f"""
+            WITH copy_progress AS (
+                SELECT
+                    c.inventory_item_id,
+                    COALESCE(SUM(c.built_count), 0) AS built_count,
+                    COALESCE(SUM(c.painted_count), 0) AS painted_count
+                FROM inventory_copies c
+                JOIN inventory_items parent ON parent.id = c.inventory_item_id
+                WHERE c.copy_number <= parent.quantity
+                GROUP BY c.inventory_item_id
+            )
             SELECT
                 i.id,
                 i.game_system,
@@ -1872,10 +1971,10 @@ def export_inventory_csv(request: Request, game_system: str = Query(default=DEFA
                 i.catalogue_file,
                 i.quantity,
                 i.models_owned,
-                i.built_count,
-                i.painted_count,
-                MAX(i.models_owned - i.built_count, 0) AS unbuilt_count,
-                MAX(i.models_owned - i.painted_count, 0) AS unpainted_count,
+                COALESCE(cp.built_count, i.built_count) AS built_count,
+                COALESCE(cp.painted_count, i.painted_count) AS painted_count,
+                MAX(i.models_owned - COALESCE(cp.built_count, i.built_count), 0) AS unbuilt_count,
+                MAX(i.models_owned - COALESCE(cp.painted_count, i.painted_count), 0) AS unpainted_count,
                 i.wargear,
                 i.wargear_selections_json AS wargear_selections,
                 i.model_number,
@@ -1893,6 +1992,7 @@ def export_inventory_csv(request: Request, game_system: str = Query(default=DEFA
                 i.updated_at
             FROM inventory_items i
             LEFT JOIN bsd_units u ON u.id = i.unit_id
+            LEFT JOIN copy_progress cp ON cp.inventory_item_id = i.id
             WHERE i.game_system = ? AND {owner_clause}
             ORDER BY i.unit_name COLLATE NOCASE
             """,
