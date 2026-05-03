@@ -81,3 +81,7 @@ Authentication is off by default. Use `WH40K_AUTH_ENABLED=true` for hosted deplo
 - Use pytest
 - Try and get 100% code coverage
 - Create a separate test_x.py file for each python file 
+
+## Commit messages
+branchName: [what is in the commit]
+example main: adding new feature x
