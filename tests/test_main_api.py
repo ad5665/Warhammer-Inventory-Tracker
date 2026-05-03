@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import app.db as db
 import app.main as main
+from app.bsdata import ImportResult, SyncResult
 
 
 class DummyUpload:
@@ -30,6 +31,27 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "BSDATA_ROOT", data_dir / "bsdata")
     monkeypatch.setattr(main, "UPLOAD_DIR", upload_dir)
     monkeypatch.setattr(main, "AUTH_ENABLED", False)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    with TestClient(main.app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def auth_client(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    upload_dir = data_dir / "uploads"
+    monkeypatch.setattr(db, "DATA_DIR", data_dir)
+    monkeypatch.setattr(db, "DB_PATH", data_dir / "stock_tracker.db")
+    monkeypatch.setattr(main, "DATA_DIR", data_dir)
+    monkeypatch.setattr(main, "DB_PATH", data_dir / "stock_tracker.db")
+    monkeypatch.setattr(main, "BSDATA_ROOT", data_dir / "bsdata")
+    monkeypatch.setattr(main, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(main, "AUTH_ENABLED", True)
+    monkeypatch.setattr(main, "AUTH_COOKIE_SECURE", False)
+    monkeypatch.setattr(main, "AUTH_SESSION_DAYS", 1)
+    monkeypatch.setattr(main, "INITIAL_ADMIN_USERNAME", "Root.Admin")
+    monkeypatch.setattr(main.secrets, "token_urlsafe", lambda length: "temporary-admin-password")
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     with TestClient(main.app) as test_client:
@@ -148,6 +170,45 @@ def test_inventory_lifecycle_copy_progress_export_and_delete(client):
     assert client.get("/api/inventory").json() == []
 
 
+def test_inventory_item_update_reseeds_copies_and_handles_missing_item(client):
+    item = client.post(
+        "/api/inventory",
+        json={
+            "unit_name": "Update Target",
+            "quantity": 1,
+            "models_owned": 5,
+            "built_count": 2,
+            "painted_count": 1,
+        },
+    ).json()
+
+    response = client.put(
+        f"/api/inventory/{item['id']}",
+        json={
+            "unit_name": "Updated Target",
+            "faction": "Adeptus Test",
+            "quantity": 2,
+            "models_owned": 8,
+            "built_count": 6,
+            "painted_count": 3,
+            "wargear": "Plasma",
+            "storage_location": "Case B",
+            "notes": "Updated notes",
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["unit_name"] == "Updated Target"
+    assert updated["faction"] == "Adeptus Test"
+    assert [copy["copy_number"] for copy in updated["copies"]] == [1, 2]
+    assert updated["built_count"] == 6
+    assert updated["painted_count"] == 3
+
+    missing = client.put("/api/inventory/999", json={"unit_name": "Missing", "quantity": 1})
+    assert missing.status_code == 404
+
+
 def test_inventory_from_catalogue_unit_uses_wargear_selection_summary(client):
     unit_id = _insert_catalogue_unit(
         wargear_options=[
@@ -221,6 +282,34 @@ def test_inventory_image_upload_download_and_delete(client):
     assert client.get(image["url"]).status_code == 404
 
 
+def test_inventory_image_upload_errors(client, monkeypatch):
+    item = client.post(
+        "/api/inventory",
+        json={"unit_name": "Photo Errors", "quantity": 1, "models_owned": 1},
+    ).json()
+
+    empty = client.post(
+        f"/api/inventory/{item['id']}/images",
+        files={"image": ("empty.png", b"", "image/png")},
+    )
+    assert empty.status_code == 400
+
+    missing_copy = client.post(
+        f"/api/inventory/{item['id']}/copies/999/images",
+        files={"image": ("copy.png", b"image", "image/png")},
+    )
+    assert missing_copy.status_code == 404
+
+    monkeypatch.setattr(main, "MAX_IMAGE_BYTES", 4)
+    too_large = client.post(
+        f"/api/inventory/{item['id']}/images",
+        files={"image": ("large.png", b"12345", "image/png")},
+    )
+    assert too_large.status_code == 413
+
+    assert client.delete("/api/images/999").status_code == 404
+
+
 def test_invalid_inputs_return_client_errors(client):
     assert client.get("/api/status", params={"game_system": "bad-system"}).status_code == 400
 
@@ -242,6 +331,100 @@ def test_invalid_inputs_return_client_errors(client):
         files={"image": ("notes.txt", b"text", "text/plain")},
     )
     assert image.status_code == 404
+
+
+def test_sync_records_success_and_failure(client, monkeypatch):
+    def fake_sync_repository(target_dir, config):
+        return SyncResult(str(target_dir), "synced", used_git=True)
+
+    def fake_import_bsdata(conn, repo_dir, game_system):
+        return ImportResult(files_scanned=2, units_imported=3, errors=["bad.cat: invalid"])
+
+    monkeypatch.setattr(main, "sync_repository", fake_sync_repository)
+    monkeypatch.setattr(main, "import_bsdata", fake_import_bsdata)
+
+    response = client.post("/api/sync/kill_team")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success_with_errors"
+    assert response.json()["errors"] == ["bad.cat: invalid"]
+
+    def failing_sync_repository(target_dir, config):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(main, "sync_repository", failing_sync_repository)
+    failed = client.post("/api/sync", params={"game_system": "kill_team"})
+    assert failed.status_code == 500
+    assert "network unavailable" in failed.json()["detail"]
+
+    with db.connect() as conn:
+        statuses = [
+            row["status"]
+            for row in conn.execute("SELECT status FROM import_runs ORDER BY id").fetchall()
+        ]
+    assert statuses == ["success_with_errors", "failed"]
+
+
+def test_auth_admin_login_password_user_creation_and_logout(auth_client):
+    assert auth_client.get("/api/auth/me").status_code == 401
+    index_redirect = auth_client.get("/", follow_redirects=False)
+    assert index_redirect.status_code == 303
+    assert index_redirect.headers["location"].startswith("/login?next=")
+    assert "Sign in" in auth_client.get("/login").text
+
+    bad_login = auth_client.post(
+        "/auth/login",
+        data={"username": "root.admin", "password": "wrong", "next_url": "/api/status"},
+    )
+    assert "Invalid username or password." in bad_login.text
+
+    login = auth_client.post(
+        "/auth/login",
+        data={
+            "username": "root.admin",
+            "password": "temporary-admin-password",
+            "next_url": "/api/status",
+        },
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    assert login.headers["location"] == "/admin"
+    assert auth_client.get("/api/status").status_code == 403
+    assert auth_client.get("/", follow_redirects=False).headers["location"] == "/admin"
+
+    mismatch = auth_client.post(
+        "/admin/password",
+        data={
+            "new_password": "permanent-password",
+            "confirm_password": "different-password",
+        },
+    )
+    assert "do not match" in mismatch.text
+
+    password_change = auth_client.post(
+        "/admin/password",
+        data={
+            "new_password": "permanent-password",
+            "confirm_password": "permanent-password",
+        },
+    )
+    assert "Password updated." in password_change.text
+    assert auth_client.get("/api/status").status_code == 200
+    assert auth_client.get("/api/auth/me").json()["user"]["must_change_password"] is False
+
+    create_user = auth_client.post(
+        "/admin/users",
+        data={"username": "Scout.User", "password": "scout-password", "is_admin": "1"},
+    )
+    assert "Created user" in create_user.text
+    duplicate = auth_client.post(
+        "/admin/users",
+        data={"username": "scout.user", "password": "scout-password"},
+    )
+    assert "Could not create user" in duplicate.text
+
+    logout = auth_client.post("/auth/logout", follow_redirects=False)
+    assert logout.status_code == 303
+    assert auth_client.get("/api/auth/me").status_code == 401
 
 
 def test_auth_validation_and_small_formatting_helpers(monkeypatch, tmp_path):

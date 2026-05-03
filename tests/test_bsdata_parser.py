@@ -1,6 +1,203 @@
 from pathlib import Path
+import sys
+import zipfile
+from xml.etree import ElementTree as ET
 
-from app.bsdata import _linked_entry_points, parse_catalogue_file
+import app.db as db
+from app import bsdata
+from app.bsdata import _linked_entry_points, import_bsdata, parse_catalogue_file, sync_repository
+
+
+def test_sync_repository_uses_git_pull_clone_and_replaces_non_git_data(tmp_path: Path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append((cmd, cwd))
+        return "pulled" if "pull" in cmd else ""
+
+    monkeypatch.setattr(bsdata, "_git_available", lambda: True)
+    monkeypatch.setattr(bsdata, "_run", fake_run)
+
+    git_target = tmp_path / "repo"
+    (git_target / ".git").mkdir(parents=True)
+    pulled = sync_repository(git_target)
+
+    assert pulled.used_git is True
+    assert pulled.message == "pulled"
+    assert calls[-1][0] == ["git", "-C", str(git_target.resolve()), "pull", "--ff-only"]
+
+    non_git_target = tmp_path / "non-git"
+    non_git_target.mkdir()
+    (non_git_target / "old-download.txt").write_text("old", encoding="utf-8")
+    cloned = sync_repository(non_git_target)
+
+    assert cloned.used_git is True
+    assert cloned.message == "Repository cloned."
+    assert calls[-1][0][0:2] == ["git", "clone"]
+    assert str(non_git_target.resolve()) == calls[-1][0][-1]
+    assert not (non_git_target / "old-download.txt").exists()
+
+
+def test_sync_repository_downloads_zip_when_git_is_unavailable(tmp_path: Path, monkeypatch):
+    config = bsdata.get_game_system_config("kill_team")
+
+    def fake_urlretrieve(url, filename):
+        assert url == config.repo_zip_url
+        with zipfile.ZipFile(filename, "w") as archive:
+            archive.writestr(f"{config.repo_slug}-{config.branch}/Kill Team.cat", "<catalogue />")
+        return filename, None
+
+    monkeypatch.setattr(bsdata, "_git_available", lambda: False)
+    monkeypatch.setattr(bsdata.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    target = tmp_path / "kill-team"
+    target.mkdir()
+    (target / "old-download.txt").write_text("old", encoding="utf-8")
+    result = sync_repository(target, config)
+
+    assert result.used_git is False
+    assert result.message == "Repository downloaded from the master branch zip."
+    assert (target / "Kill Team.cat").read_text(encoding="utf-8") == "<catalogue />"
+    assert not (target / "old-download.txt").exists()
+
+
+def test_sync_repository_rejects_zip_without_expected_root(tmp_path: Path, monkeypatch):
+    config = bsdata.get_game_system_config("kill_team")
+
+    def fake_urlretrieve(url, filename):
+        with zipfile.ZipFile(filename, "w") as archive:
+            archive.writestr("unexpected-root/Kill Team.cat", "<catalogue />")
+        return filename, None
+
+    monkeypatch.setattr(bsdata, "_git_available", lambda: False)
+    monkeypatch.setattr(bsdata.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    try:
+        sync_repository(tmp_path / "kill-team", config)
+    except RuntimeError as exc:
+        assert "expected root directory" in str(exc)
+    else:
+        raise AssertionError("Expected sync_repository to reject an invalid archive")
+
+
+def test_bsdata_helper_edge_cases():
+    assert bsdata._run([sys.executable, "-c", "print('ok')"]) == "ok"
+    assert isinstance(bsdata._git_available(), bool)
+    assert bsdata._local_name("plain") == "plain"
+    assert bsdata._clean_text(None) == ""
+
+    costs = ET.fromstring(
+        """
+        <root>
+          <cost name="power" typeId="power" value="1" />
+          <cost name="pts" typeId="points" value="bad" />
+        </root>
+        """
+    )
+    assert bsdata._point_cost(list(costs)) is None
+
+    nested_cost = ET.fromstring(
+        """
+        <selectionEntry>
+          <entryLinks>
+            <entryLink>
+              <costs><cost name="pts" typeId="points" value="42" /></costs>
+            </entryLink>
+          </entryLinks>
+        </selectionEntry>
+        """
+    )
+    assert bsdata._direct_cost(nested_cost) == 42
+
+    assert bsdata._constraint_int(None) is None
+    assert bsdata._constraint_int("bad") is None
+    assert bsdata._constraint_int("-1") is None
+    assert bsdata._constraint_int("1.5") is None
+
+    constraints = ET.fromstring(
+        """
+        <selectionEntry>
+          <constraints>
+            <constraint type="min" value="1" field="models" scope="parent" />
+            <constraint type="max" value="bad" field="selections" scope="parent" />
+            <constraint type="min" value="2" field="selections" scope="roster" />
+          </constraints>
+        </selectionEntry>
+        """
+    )
+    assert bsdata._selection_constraints(constraints) == (None, None)
+
+    assert bsdata._size_from_name("") is None
+    size = bsdata._size_from_name("2 to 4 Bodyguards and 1 Leader")
+    assert (size.min_models, size.max_models) == (3, 5)
+    assert bsdata._size_from_name("0 Servitors") is None
+    assert bsdata._composition_name("10-20 Termagants") == "Termagants"
+
+    key = bsdata._component_key("A" * 80, {"id": "model-id"}, 1, 1)
+    assert key.startswith("a" * 44)
+
+
+def test_import_bsdata_records_errors_assigns_linked_points_and_upserts(tmp_path: Path, monkeypatch):
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(db, "DATA_DIR", data_dir)
+    monkeypatch.setattr(db, "DB_PATH", data_dir / "stock_tracker.db")
+    db.init_db()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    unit_path = repo_dir / "Units.cat"
+    unit_path.write_text(
+        '''<?xml version="1.0" encoding="UTF-8"?>
+        <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Test Faction">
+          <selectionEntries>
+            <selectionEntry id="unit-1" name="Original Squad" type="unit" />
+          </selectionEntries>
+        </catalogue>
+        ''',
+        encoding="utf-8",
+    )
+    (repo_dir / "Links.cat").write_text(
+        '''<?xml version="1.0" encoding="UTF-8"?>
+        <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Test Faction">
+          <entryLinks>
+            <entryLink id="link-unit" name="Original Squad" type="selectionEntry" targetId="unit-1">
+              <costs><cost name="pts" typeId="points" value="125" /></costs>
+            </entryLink>
+          </entryLinks>
+        </catalogue>
+        ''',
+        encoding="utf-8",
+    )
+    (repo_dir / "Broken.cat").write_text("<catalogue>", encoding="utf-8")
+
+    with db.connect() as conn:
+        first = import_bsdata(conn, repo_dir)
+
+    assert first.files_scanned == 3
+    assert first.units_imported == 1
+    assert first.errors and first.errors[0].startswith("Broken.cat:")
+
+    unit_path.write_text(
+        '''<?xml version="1.0" encoding="UTF-8"?>
+        <catalogue xmlns="http://www.battlescribe.net/schema/catalogueSchema" name="Test Faction">
+          <selectionEntries>
+            <selectionEntry id="unit-1" name="Updated Squad" type="unit" />
+          </selectionEntries>
+        </catalogue>
+        ''',
+        encoding="utf-8",
+    )
+    with db.connect() as conn:
+        second = import_bsdata(conn, repo_dir)
+        rows = conn.execute(
+            "SELECT name, points, active FROM bsd_units WHERE bs_id = 'unit-1'"
+        ).fetchall()
+
+    assert second.units_imported == 1
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Updated Squad"
+    assert rows[0]["points"] == 125
+    assert rows[0]["active"] == 1
 
 
 def test_parse_catalogue_file_reads_unit_entries(tmp_path: Path):
