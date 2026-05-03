@@ -5,6 +5,7 @@ const state = {
   inventory: [],
   gameSystems: [],
   currentGame: localStorage.getItem("warhammer-stock-current-game") || DEFAULT_GAME,
+  auth: null,
   lastUnitQuery: "",
   unitResults: [],
   collapsedInventoryItems: new Set(),
@@ -46,15 +47,27 @@ const fallbackSystems = [
 
 const el = (id) => document.getElementById(id);
 
-function savedTheme() {
-  const theme = localStorage.getItem("warhammer-stock-theme") || DEFAULT_THEME;
+function normalizeTheme(themeId) {
+  const theme = String(themeId || "").trim().toLowerCase();
   return themes.some(candidate => candidate.id === theme) ? theme : DEFAULT_THEME;
 }
 
-function applyTheme(themeId) {
-  const theme = themes.some(candidate => candidate.id === themeId) ? themeId : DEFAULT_THEME;
+function savedTheme() {
+  return normalizeTheme(localStorage.getItem("warhammer-stock-theme") || DEFAULT_THEME);
+}
+
+function applyTheme(themeId, options = {}) {
+  const { persistLocal = true } = options;
+  const theme = normalizeTheme(themeId);
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem("warhammer-stock-theme", theme);
+  if (persistLocal) {
+    localStorage.setItem("warhammer-stock-theme", theme);
+  }
+  const select = el("theme-select");
+  if (select && select.value !== theme) {
+    select.value = theme;
+  }
+  return theme;
 }
 
 applyTheme(savedTheme());
@@ -171,6 +184,26 @@ function withGame(path) {
   return `${path}${separator}game_system=${encodeURIComponent(state.currentGame)}`;
 }
 
+async function loadAuthStatus() {
+  try {
+    const auth = await api("/api/auth/me");
+    state.auth = auth;
+    const status = el("auth-status");
+    const link = el("auth-link");
+    if (!status || !link) return;
+    if (auth.auth_enabled && auth.user) {
+      status.textContent = auth.user.display_name || auth.user.username || "Signed in";
+      link.hidden = false;
+      applyTheme(auth.preferences?.theme || auth.user.preferred_theme || savedTheme());
+    } else {
+      status.textContent = "";
+      link.hidden = true;
+    }
+  } catch (_) {
+    // Authentication redirects are handled globally by api().
+  }
+}
+
 function formatImportDate(lastImport) {
   if (!lastImport || !lastImport.finished_at) return "Never";
   const date = new Date(lastImport.finished_at);
@@ -204,7 +237,24 @@ function renderThemeOptions() {
   select.innerHTML = themes.map(theme => `
     <option value="${esc(theme.id)}">${esc(theme.label)}</option>
   `).join("");
-  select.value = savedTheme();
+  select.value = normalizeTheme(document.documentElement.dataset.theme || savedTheme());
+}
+
+async function saveThemePreference(themeId) {
+  const theme = applyTheme(themeId);
+  if (!state.auth?.auth_enabled || !state.auth?.user) {
+    return;
+  }
+  try {
+    const preferences = await api("/api/auth/preferences", {
+      method: "PUT",
+      body: JSON.stringify({ theme }),
+    });
+    state.auth.preferences = { ...(state.auth.preferences || {}), theme: preferences.theme || theme };
+    state.auth.user.preferred_theme = preferences.theme || theme;
+  } catch (error) {
+    toast(`Could not save theme: ${error.message}`, "error");
+  }
 }
 
 function updateGameCopy() {
@@ -494,6 +544,7 @@ async function addUnit(unitId) {
     });
     toast("Added to inventory.");
     await Promise.all([loadInventory(), loadStatus()]);
+    closeDialog(el("catalog-modal"));
   } catch (error) {
     toast(error.message, "error");
   }
@@ -1337,6 +1388,28 @@ async function uploadCopyImage(itemId, copyId, input) {
   }
 }
 
+async function importCsv(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const result = await api(withGame("/api/import.csv"), {
+      method: "POST",
+      body: formData,
+    });
+    toast(`Imported ${result.imported} rows (${result.created} new, ${result.updated} updated).`);
+    clearCatalogueSearch();
+    await refreshGameData();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    input.value = "";
+  }
+}
+
 async function deleteImage(imageId) {
   if (!confirm("Delete this photo?")) return;
   try {
@@ -1401,10 +1474,49 @@ async function setGameSystem(gameSystem) {
   }
 }
 
+function openDialog(dialogId, focusSelector) {
+  const dialog = el(dialogId);
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") {
+    if (!dialog.open) dialog.showModal();
+  } else {
+    dialog.setAttribute("open", "");
+  }
+  window.requestAnimationFrame(() => {
+    dialog.querySelector(focusSelector)?.focus();
+  });
+}
+
+function closeDialog(dialog) {
+  if (!dialog) return;
+  if (typeof dialog.close === "function" && dialog.open) {
+    dialog.close();
+    return;
+  }
+  dialog.removeAttribute("open");
+}
+
 function wireEvents() {
   renderThemeOptions();
   el("theme-select")?.addEventListener("change", (event) => {
-    applyTheme(event.target.value);
+    saveThemePreference(event.target.value);
+  });
+  el("csv-import-input")?.addEventListener("change", (event) => {
+    importCsv(event.target);
+  });
+  el("open-catalog-modal")?.addEventListener("click", () => {
+    openDialog("catalog-modal", "#unit-query");
+  });
+  el("open-custom-modal")?.addEventListener("click", () => {
+    openDialog("custom-modal", '[name="unit_name"]');
+  });
+  document.querySelectorAll("[data-dialog-close]").forEach(button => {
+    button.addEventListener("click", () => closeDialog(button.closest("dialog")));
+  });
+  document.querySelectorAll(".modal-dialog").forEach(dialog => {
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) closeDialog(dialog);
+    });
   });
   el("sync-btn").addEventListener("click", syncBsdata);
   el("faction-filter").addEventListener("change", searchUnits);
@@ -1482,6 +1594,7 @@ function wireEvents() {
       form.querySelector('[name="painted_count"]').value = 0;
       toast("Custom item added.");
       await Promise.all([loadInventory(), loadStatus()]);
+      closeDialog(el("custom-modal"));
     } catch (error) {
       toast(error.message, "error");
     }
@@ -1500,6 +1613,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
   try {
     clearCatalogueSearch();
+    await loadAuthStatus();
     await loadGameSystems();
     await refreshGameData();
   } catch (error) {

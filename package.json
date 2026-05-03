@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "export:openapi": "python scripts/export_openapi.py packages/api-client/openapi.json",
+    "generate:api-client": "npx openapi-typescript packages/api-client/openapi.json -o packages/api-client/src/schema.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.8.0"
+  }
+}

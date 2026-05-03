@@ -23,15 +23,11 @@ class DummyUpload:
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
-    upload_dir = data_dir / "uploads"
     monkeypatch.setattr(db, "DATA_DIR", data_dir)
-    monkeypatch.setattr(db, "DB_PATH", data_dir / "stock_tracker.db")
     monkeypatch.setattr(main, "DATA_DIR", data_dir)
-    monkeypatch.setattr(main, "DB_PATH", data_dir / "stock_tracker.db")
     monkeypatch.setattr(main, "BSDATA_ROOT", data_dir / "bsdata")
-    monkeypatch.setattr(main, "UPLOAD_DIR", upload_dir)
     monkeypatch.setattr(main, "AUTH_ENABLED", False)
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(main, "AUTH_PROVIDER", "local")
 
     with TestClient(main.app) as test_client:
         yield test_client
@@ -40,19 +36,15 @@ def client(tmp_path, monkeypatch):
 @pytest.fixture
 def auth_client(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
-    upload_dir = data_dir / "uploads"
     monkeypatch.setattr(db, "DATA_DIR", data_dir)
-    monkeypatch.setattr(db, "DB_PATH", data_dir / "stock_tracker.db")
     monkeypatch.setattr(main, "DATA_DIR", data_dir)
-    monkeypatch.setattr(main, "DB_PATH", data_dir / "stock_tracker.db")
     monkeypatch.setattr(main, "BSDATA_ROOT", data_dir / "bsdata")
-    monkeypatch.setattr(main, "UPLOAD_DIR", upload_dir)
     monkeypatch.setattr(main, "AUTH_ENABLED", True)
+    monkeypatch.setattr(main, "AUTH_PROVIDER", "local")
     monkeypatch.setattr(main, "AUTH_COOKIE_SECURE", False)
     monkeypatch.setattr(main, "AUTH_SESSION_DAYS", 1)
     monkeypatch.setattr(main, "INITIAL_ADMIN_USERNAME", "Root.Admin")
     monkeypatch.setattr(main.secrets, "token_urlsafe", lambda length: "temporary-admin-password")
-    upload_dir.mkdir(parents=True, exist_ok=True)
 
     with TestClient(main.app) as test_client:
         yield test_client
@@ -70,16 +62,18 @@ def _insert_catalogue_unit(
         cursor = conn.execute(
             """
             INSERT INTO bsd_units (
-                game_system, bs_id, name, faction, catalogue_file, entry_type,
+                public_id, game_system, bs_id, name, faction, catalogue_file, entry_type,
                 points, min_models, max_models, keywords, stats_json,
                 wargear_options_json, model_composition_json, active, imported_at
             ) VALUES (
-                'wh40k_10e', 'unit-1', ?, ?, 'Space Marines.cat', 'unit',
+                ?, 'wh40k_10e', 'unit-1', ?, ?, 'Space Marines.cat', 'unit',
                 90, 5, 10, 'Infantry, Battleline', ?,
                 ?, ?, 1, ?
             )
+            RETURNING id
             """,
             (
+                db._new_public_id(),
                 name,
                 faction,
                 json.dumps({"T": "4", "SV": "3+"}),
@@ -88,7 +82,7 @@ def _insert_catalogue_unit(
                 now,
             ),
         )
-        return cursor.lastrowid
+        return cursor.fetchone()["id"]
 
 
 def test_status_game_systems_units_and_factions(client):
@@ -108,6 +102,8 @@ def test_status_game_systems_units_and_factions(client):
     units = client.get("/api/units", params={"query": "chaos lord"}).json()
     assert len(units) == 1
     assert units[0]["name"] == "Chaos Lords"
+    assert units[0]["public_id"]
+    assert units[0]["version"] == 1
     assert units[0]["stats"] == {"T": "4", "SV": "3+"}
     assert units[0]["wargear_option_count"] == 0
 
@@ -132,9 +128,12 @@ def test_inventory_lifecycle_copy_progress_export_and_delete(client):
     assert create_response.status_code == 201
     item = create_response.json()
     assert item["unit_name"] == "Custom Scouts"
+    assert item["public_id"]
+    assert item["version"] == 1
     assert item["unbuilt_count"] == 4
     assert item["unpainted_count"] == 6
     assert [copy["copy_number"] for copy in item["copies"]] == [1, 2]
+    assert all(copy["public_id"] for copy in item["copies"])
     assert [copy["built_count"] for copy in item["copies"]] == [6, 0]
 
     copy_id = item["copies"][1]["id"]
@@ -152,22 +151,47 @@ def test_inventory_lifecycle_copy_progress_export_and_delete(client):
     )
     assert copy_response.status_code == 200
     assert copy_response.json()["built_count"] == 2
+    assert copy_response.json()["version"] == 2
 
     inventory = client.get("/api/inventory").json()
     assert len(inventory) == 1
     assert inventory[0]["built_count"] == 8
     assert inventory[0]["painted_count"] == 5
+    assert inventory[0]["version"] == 2
 
     export_response = client.get("/api/export.csv")
     assert export_response.status_code == 200
     rows = list(csv.DictReader(io.StringIO(export_response.text)))
     assert rows[0]["unit_name"] == "Custom Scouts"
+    assert rows[0]["public_id"] == item["public_id"]
     assert rows[0]["built_count"] == "8"
     assert rows[0]["painted_count"] == "5"
 
     delete_response = client.delete(f"/api/inventory/{item['id']}")
     assert delete_response.status_code == 204
     assert client.get("/api/inventory").json() == []
+    with db.connect() as conn:
+        deleted = conn.execute("SELECT deleted_at FROM inventory_items WHERE id = ?", (item["id"],)).fetchone()
+    assert deleted["deleted_at"] is not None
+
+    import_response = client.post(
+        "/api/import.csv",
+        files={"file": ("warhammer_inventory_wh40k_10e.csv", export_response.text, "text/csv")},
+    )
+    assert import_response.status_code == 200
+    assert import_response.json()["updated"] == 1
+    imported_inventory = client.get("/api/inventory").json()
+    assert len(imported_inventory) == 1
+    assert imported_inventory[0]["public_id"] == item["public_id"]
+    assert imported_inventory[0]["unit_name"] == "Custom Scouts"
+    assert imported_inventory[0]["built_count"] == 8
+    assert imported_inventory[0]["painted_count"] == 5
+
+    invalid_import = client.post(
+        "/api/import.csv",
+        files={"file": ("bad.csv", "unit_name,quantity\nBad,-1\n", "text/csv")},
+    )
+    assert invalid_import.status_code == 400
 
 
 def test_inventory_item_update_reseeds_copies_and_handles_missing_item(client):
@@ -266,6 +290,8 @@ def test_inventory_image_upload_download_and_delete(client):
     )
     assert upload_response.status_code == 201
     image = upload_response.json()
+    assert image["public_id"]
+    assert image["storage_key"].startswith(f"inventory/{item['public_id']}/")
     assert image["image_role"] == "painted"
     assert image["caption"] == "Done"
     assert image["original_name"] == "finished.png"
@@ -280,6 +306,9 @@ def test_inventory_image_upload_download_and_delete(client):
     delete_response = client.delete(f"/api/images/{image['id']}")
     assert delete_response.status_code == 204
     assert client.get(image["url"]).status_code == 404
+    with db.connect() as conn:
+        deleted = conn.execute("SELECT deleted_at FROM inventory_images WHERE id = ?", (image["id"],)).fetchone()
+    assert deleted["deleted_at"] is not None
 
 
 def test_inventory_image_upload_errors(client, monkeypatch):
@@ -409,7 +438,18 @@ def test_auth_admin_login_password_user_creation_and_logout(auth_client):
     )
     assert "Password updated." in password_change.text
     assert auth_client.get("/api/status").status_code == 200
-    assert auth_client.get("/api/auth/me").json()["user"]["must_change_password"] is False
+    auth_info = auth_client.get("/api/auth/me").json()
+    assert auth_info["user"]["must_change_password"] is False
+    assert auth_info["preferences"]["theme"] == "default"
+
+    theme_update = auth_client.put("/api/auth/preferences", json={"theme": "night-lords"})
+    assert theme_update.status_code == 200
+    assert theme_update.json() == {"theme": "night-lords"}
+    saved_auth_info = auth_client.get("/api/auth/me").json()
+    assert saved_auth_info["preferences"]["theme"] == "night-lords"
+    assert saved_auth_info["user"]["preferred_theme"] == "night-lords"
+    invalid_theme = auth_client.put("/api/auth/preferences", json={"theme": "tyranids"})
+    assert invalid_theme.status_code == 400
 
     create_user = auth_client.post(
         "/admin/users",
@@ -453,8 +493,10 @@ def test_auth_validation_and_small_formatting_helpers(monkeypatch, tmp_path):
     assert main._safe_next_url("/inventory?unit=1") == "/inventory?unit=1"
     assert main._safe_next_url("https://example.com") == "/"
     assert main._safe_next_url("//example.com") == "/"
-    assert main._inventory_owner_clause(None) == ("i.owner_user_id IS NULL", [])
-    assert main._inventory_owner_clause(7, alias="") == ("owner_user_id = ?", [7])
+    assert main._inventory_owner_clause(None) == ("i.owner_user_id IS NULL AND i.deleted_at IS NULL", [])
+    assert main._inventory_owner_clause(7, alias="") == ("owner_user_id = ? AND deleted_at IS NULL", [7])
+    monkeypatch.setenv("WH40K_CSV_VALUES", " http://localhost:5173, ,exp://127.0.0.1:8081 ")
+    assert main._csv_env_values("WH40K_CSV_VALUES") == ["http://localhost:5173", "exp://127.0.0.1:8081"]
 
     assert main._decode_wargear_options(None) == []
     assert main._decode_wargear_options("{bad") == []
@@ -486,7 +528,6 @@ def test_auth_validation_and_small_formatting_helpers(monkeypatch, tmp_path):
         )
     ) == "2 x Bolt rifle; Extra ammo"
 
-    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path)
     main._delete_image_file(1, "missing.png")
     assert main._safe_image_role("Painted") == "painted"
     assert main._safe_image_role("invalid") == "other"

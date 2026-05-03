@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wh40k-stock-tracker"
 version = "0.2.0"
-description = "A small FastAPI and SQLite stock tracker for Warhammer 40,000 and Kill Team models using BSData catalogues."
+description = "A FastAPI and Postgres stock tracker for Warhammer 40,000, Kill Team, and Age of Sigmar models using BSData catalogues."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.111,<1.0",
@@ -14,6 +14,10 @@ dependencies = [
   "uvicorn[standard]>=0.30,<1.0",
   "pydantic>=2.7,<3.0",
   "python-multipart>=0.0.9,<1.0",
+  "httpx>=0.27,<1.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "boto3>=1.34,<2.0",
+  "PyJWT[crypto]>=2.8,<3.0",
 ]
 
 [tool.setuptools]

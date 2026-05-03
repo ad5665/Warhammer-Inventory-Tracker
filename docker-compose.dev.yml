@@ -2,7 +2,7 @@ services:
   web:
     build:
       context: .
-    image: wh40k-stock-tracker:local
+    image: wh40k-stock-tracker:dev
     depends_on:
       postgres:
         condition: service_healthy
@@ -15,8 +15,9 @@ services:
     environment:
       WH40K_DATA_DIR: /app/data
       WH40K_AUTH_ENABLED: ${WH40K_AUTH_ENABLED:-true}
-      WH40K_COOKIE_SECURE: ${WH40K_COOKIE_SECURE:-false}
+      WH40K_COOKIE_SECURE: "false"
       WH40K_PORT: ${WH40K_PORT:-8000}
+      WH40K_CORS_ORIGINS: ${WH40K_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:19006,http://127.0.0.1:19006}
       AUTH_PROVIDER: ${AUTH_PROVIDER:-keycloak}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://127.0.0.1:8000}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-http://localhost:8081/realms/wh40k}
@@ -26,13 +27,13 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://wh40k:wh40k@postgres:5432/wh40k}
       WH40K_DB_SCHEMA: ${WH40K_DB_SCHEMA:-public}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
-      S3_BUCKET: ${S3_BUCKET:-wh40k-uploads}
+      S3_BUCKET: ${S3_BUCKET:-wh40k-dev-uploads}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-wh40k}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-wh40k-secret}
       AWS_REGION: ${AWS_REGION:-us-east-1}
     volumes:
-      - wh40k-stock-data:/app/data
+      - wh40k-dev-data:/app/data
 
   postgres:
     image: postgres:16-alpine
@@ -43,7 +44,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-wh40k}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wh40k}
     volumes:
-      - wh40k-stock-postgres:/var/lib/postgresql/data
+      - wh40k-dev-postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -60,7 +61,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wh40k}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wh40k-secret}
     volumes:
-      - wh40k-stock-minio:/data
+      - wh40k-dev-minio:/data
 
   minio-init:
     image: minio/mc:latest
@@ -76,7 +77,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wh40k}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wh40k-secret}
-      S3_BUCKET: ${S3_BUCKET:-wh40k-uploads}
+      S3_BUCKET: ${S3_BUCKET:-wh40k-dev-uploads}
 
   keycloak-db-init:
     image: postgres:16-alpine
@@ -139,6 +140,6 @@ services:
       - ./infra/keycloak:/opt/keycloak/data/import:ro
 
 volumes:
-  wh40k-stock-data:
-  wh40k-stock-postgres:
-  wh40k-stock-minio:
+  wh40k-dev-data:
+  wh40k-dev-postgres:
+  wh40k-dev-minio:

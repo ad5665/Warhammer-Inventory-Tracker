@@ -1,0 +1,46 @@
+{
+  "realm": "wh40k",
+  "displayName": "Warhammer Stock Tracker",
+  "loginTheme": "night-lords",
+  "enabled": true,
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": true,
+  "verifyEmail": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "wh40k-admin",
+        "description": "Warhammer Stock Tracker administrator"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "wh40k-web",
+      "name": "Warhammer Stock Tracker Web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:8000/auth/oidc/callback",
+        "http://localhost:8000/auth/oidc/callback"
+      ],
+      "webOrigins": [
+        "http://127.0.0.1:8000",
+        "http://localhost:8000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://127.0.0.1:8000/login##http://localhost:8000/login"
+      }
+    }
+  ]
+}

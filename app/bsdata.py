@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from .db import utc_now_sql
+from .db import _new_public_id, utc_now_sql
 
 DEFAULT_GAME_SYSTEM = "wh40k_10e"
 
@@ -1213,7 +1213,9 @@ def _upsert_unit(conn: Any, unit: ParsedUnit, imported_at: str) -> None:
                 wargear_options_json = ?,
                 model_composition_json = ?,
                 active = 1,
-                imported_at = ?
+                imported_at = ?,
+                version = COALESCE(version, 1) + 1,
+                deleted_at = NULL
             WHERE id = ?
             """,
             (*values, existing["id"]),
@@ -1223,12 +1225,12 @@ def _upsert_unit(conn: Any, unit: ParsedUnit, imported_at: str) -> None:
     conn.execute(
         """
         INSERT INTO bsd_units (
-            game_system, bs_id, name, faction, catalogue_file, entry_type, points,
+            public_id, game_system, bs_id, name, faction, catalogue_file, entry_type, points,
             min_models, max_models, keywords, stats_json, wargear_options_json,
             model_composition_json, active, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         """,
-        values,
+        (_new_public_id(), *values),
     )
 
 
@@ -1266,7 +1268,16 @@ def import_bsdata(conn: Any, repo_dir: Path, game_system: str = DEFAULT_GAME_SYS
     units_imported = 0
     errors: list[str] = []
 
-    conn.execute("UPDATE bsd_units SET active = 0 WHERE game_system = ?", (config.id,))
+    conn.execute(
+        """
+        UPDATE bsd_units
+        SET active = 0,
+            deleted_at = COALESCE(deleted_at, ?),
+            version = COALESCE(version, 1) + 1
+        WHERE game_system = ? AND active = 1
+        """,
+        (now, config.id),
+    )
 
     cat_files = sorted(
         p for p in repo_dir.rglob("*.cat")

@@ -140,7 +140,6 @@ def test_bsdata_helper_edge_cases():
 def test_import_bsdata_records_errors_assigns_linked_points_and_upserts(tmp_path: Path, monkeypatch):
     data_dir = tmp_path / "data"
     monkeypatch.setattr(db, "DATA_DIR", data_dir)
-    monkeypatch.setattr(db, "DB_PATH", data_dir / "stock_tracker.db")
     db.init_db()
 
     repo_dir = tmp_path / "repo"

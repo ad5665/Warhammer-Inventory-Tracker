@@ -3,13 +3,14 @@
 A small Python web app for tracking which Warhammer 40,000, Kill Team, and Age of Sigmar models you own. It uses:
 
 - **FastAPI** for the web app and JSON API
-- **SQLite** for a lightweight local database
+- **Postgres** for shared application data
+- **S3-compatible object storage** for uploaded photos, with MinIO used locally
 - **Vanilla HTML/CSS/JavaScript** for the front end
 - **BSData/wh40k-10e** for Warhammer 40,000 catalogue data
 - **BSData/wh40k-killteam** for Kill Team catalogue data
 - **BSData/age-of-sigmar-4th** for Age of Sigmar catalogue data
 
-When run directly, the app stores your inventory locally in `data/stock_tracker.db`, stores uploaded photos in `data/uploads/`, and downloads/clones BSData files into `data/bsdata/`. In Docker, `/app/data` is backed by the `wh40k-stock-data` named volume.
+In Docker Compose, Postgres stores inventory/auth/catalogue data, MinIO stores uploaded photos, and `/app/data` is only used for downloaded BSData working files.
 
 ## Features
 
@@ -25,8 +26,8 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 - Track **model number(s)**, for example a number written under a figure base.
 - Upload photos for each inventory row and mark each photo as built, painted, WIP, reference, or other.
 - Export the current tab's inventory as CSV.
-- Optional username/password login for public hosting, with an admin-only user creation portal.
-- Uses local SQLite only; no hosted service is required.
+- Keycloak-backed login and self-service signup in the local Compose stack, with JWT support for API/mobile clients.
+- Runs locally with Postgres and MinIO, matching the hosted database/object-storage shape.
 
 ## Screenshots
 
@@ -38,20 +39,10 @@ When run directly, the app stores your inventory locally in `data/stock_tracker.
 
 ## Quick start
 
+Use Docker Compose for the complete local stack:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python run.py
-```
-
-On Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python run.py
+docker compose up --build
 ```
 
 Open the app at:
@@ -60,7 +51,42 @@ Open the app at:
 http://127.0.0.1:8000
 ```
 
+Compose starts with authentication enabled. Use `http://127.0.0.1:8000/signup` to create a user through Keycloak, or sign in from the app login page.
+
+Keycloak is available at `http://localhost:8081`. The development admin login is `admin` / `admin-password`.
+
+MinIO is available at `http://127.0.0.1:9001` with username `wh40k` and password `wh40k-secret`.
+
 Then choose the **40k**, **Kill Team**, or **AoS** tab and click **Sync BSData** under **Last import**.
+
+## Python development
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Start Postgres and MinIO first, then run the app against those local services:
+
+```bash
+docker compose up -d postgres minio minio-init
+DATABASE_URL=postgresql://wh40k:wh40k@127.0.0.1:5432/wh40k \
+STORAGE_BACKEND=s3 \
+S3_ENDPOINT_URL=http://127.0.0.1:9000 \
+S3_BUCKET=wh40k-uploads \
+AWS_ACCESS_KEY_ID=wh40k \
+AWS_SECRET_ACCESS_KEY=wh40k-secret \
+python run.py
+```
 
 To run the local dev server with login enabled:
 
@@ -76,22 +102,13 @@ WH40K_PORT=9000 python run.py
 
 ## Optional Docker run
 
-Create a named Docker volume once, then run with Compose. The SQLite database, uploads, and downloaded BSData live in `wh40k-stock-data`, so they survive container recreation:
+Run the full local stack with Compose:
 
 ```bash
-docker volume create wh40k-stock-data
 docker compose up --build
 ```
 
-Or with plain Docker:
-
-```bash
-docker build -t wh40k-stock-tracker .
-docker volume create wh40k-stock-data
-docker run --rm -p 8000:8000 --mount source=wh40k-stock-data,target=/app/data wh40k-stock-tracker
-```
-
-Then open `http://127.0.0.1:8000`.
+Postgres data, MinIO objects, and BSData working files are stored in named Docker volumes and survive container recreation.
 
 To run Docker on another port, set `WH40K_PORT` for both the app and Compose port mapping:
 
@@ -99,48 +116,66 @@ To run Docker on another port, set `WH40K_PORT` for both the app and Compose por
 WH40K_PORT=9000 docker compose up --build
 ```
 
-With plain Docker:
+## Local cloud-style development stack
+
+For the web/mobile sync migration, use the dev Compose stack. It builds the app locally and starts Postgres plus MinIO as local stand-ins for hosted database and S3 storage:
 
 ```bash
-docker run --rm -p 9000:9000 \
-  -e WH40K_PORT=9000 \
-  --mount source=wh40k-stock-data,target=/app/data \
-  wh40k-stock-tracker
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-## Optional authentication
+This stack uses Postgres and MinIO through the same backend adapters as the app. See [docs/development/local-container-stack.md](docs/development/local-container-stack.md).
 
-Authentication is off by default for local use. To require a login when hosting publicly, enable it at runtime:
+## Authentication
+
+Docker Compose defaults to provider-backed auth:
 
 ```bash
-WH40K_AUTH_ENABLED=true docker compose up --build
+docker compose up --build
 ```
 
-With plain Docker:
+The default provider is Keycloak. It runs locally, stores its state in the Postgres `keycloak` schema, and imports the `wh40k` realm only when it is missing. Public registration is enabled, so `/signup` sends users to the Keycloak registration page and returns them to the tracker after login. The local registration profile asks for username, email, and password only.
+
+The local Keycloak realm uses the `night-lords` login theme from `infra/keycloak/themes/night-lords`, which gives the login and registration screens a midnight-blue, steel, red, brass, and lightning-accented treatment.
+
+Useful local URLs:
+
+- App: `http://127.0.0.1:8000`
+- Signup: `http://127.0.0.1:8000/signup`
+- Keycloak: `http://localhost:8081`
+- Keycloak admin console: `http://localhost:8081/admin/master/console/#/wh40k`
+- MinIO console: `http://127.0.0.1:9001`
+
+Development credentials:
+
+- Keycloak admin: `admin` / `admin-password`
+- MinIO: `wh40k` / `wh40k-secret`
+
+Useful auth environment variables:
+
+- `WH40K_AUTH_ENABLED=true` - require login for the app, API, and uploads.
+- `AUTH_PROVIDER=keycloak` - use OIDC/Keycloak signup and login.
+- `APP_PUBLIC_URL=http://127.0.0.1:8000` - public URL used for OIDC callbacks and logout redirects.
+- `OIDC_ISSUER_URL=http://localhost:8081/realms/wh40k` - browser-visible OIDC issuer.
+- `OIDC_INTERNAL_ISSUER_URL=http://keycloak:8080/realms/wh40k` - container-network issuer used to fetch tokens and signing keys.
+- `OIDC_CLIENT_ID=wh40k-web` - OIDC client id.
+- `OIDC_ADMIN_ROLE=wh40k-admin` - provider role that grants app admin access.
+- `WH40K_SESSION_DAYS=30` - app cookie session lifetime after OIDC login.
+- `WH40K_COOKIE_SECURE=true` - use this when serving only over HTTPS.
+
+To run the Compose stack without auth during development:
 
 ```bash
-docker run --rm -p 8000:8000 \
-  -e WH40K_AUTH_ENABLED=true \
-  --mount source=wh40k-stock-data,target=/app/data \
-  wh40k-stock-tracker
+WH40K_AUTH_ENABLED=false docker compose up --build
 ```
 
-On the first startup with auth enabled, if no admin user exists, the app creates `admin` with a temporary password and prints it to the container logs. Read it with:
+Standalone Python runs still default to auth disabled. If you use the legacy local password provider with `python run.py --auth` or `AUTH_PROVIDER=local WH40K_AUTH_ENABLED=true`, the first startup creates a temporary `admin` password in the logs:
 
 ```bash
 docker compose logs web
 ```
 
-Sign in, open `/admin`, and set your permanent admin password. Users can only be created from `/admin`; there is no public account registration page. When auth is enabled, each user has their own inventory list and uploaded photos; BSData catalogue imports are shared.
-
-Useful auth environment variables:
-
-- `WH40K_AUTH_ENABLED=true` - require login for the app, API, and uploads.
-- `WH40K_PORT=8000` - listen on a different app/container port. The Docker Compose file also maps this as the host port.
-- `PORT=8000` - fallback listen-port variable for hosting platforms that provide `PORT`.
-- `WH40K_ADMIN_USERNAME=admin` - initial admin username when bootstrapping auth.
-- `WH40K_SESSION_DAYS=30` - login session lifetime.
-- `WH40K_COOKIE_SECURE=true` - use this when serving only over HTTPS.
+In provider auth mode, users are created and managed in Keycloak. In local password mode, users are managed from `/admin`.
 
 ## How syncing works
 
@@ -191,18 +226,19 @@ Main endpoints:
 - `GET /api/inventory?game_system=age_of_sigmar_4e` - list AoS inventory
 - `POST /api/inventory` - add inventory item
 - `PUT /api/inventory/{id}` - update inventory item
-- `DELETE /api/inventory/{id}` - delete inventory item and its local photos
+- `DELETE /api/inventory/{id}` - delete inventory item and its stored photos
 - `PUT /api/inventory/{id}/copies/{copy_id}` - update one per-quantity copy box
 - `POST /api/inventory/{id}/images` - upload a JPG, PNG, WebP, or GIF photo
 - `POST /api/inventory/{id}/copies/{copy_id}/images` - upload a photo to one per-quantity copy
 - `DELETE /api/images/{image_id}` - delete a photo
 - `GET /api/export.csv?game_system=wh40k_10e` - export the selected tab as CSV
+- `POST /api/import.csv?game_system=wh40k_10e` - import a CSV previously exported by this app
 
 ## Data model notes
 
 `bsd_units` contains imported catalogue data, scoped by `game_system`, including `wargear_options_json` for weapon profiles and `model_composition_json` for model-specific unit composition discovered in the `.cat` XML. `inventory_items` contains your own collection, scoped by `game_system` and, when auth is enabled, `owner_user_id`. `inventory_copies` stores one child record per inventory quantity, including per-copy base number, wargear selections, location, notes, and photos. Inventory rows keep a snapshot of the unit name and faction/team so your collection remains readable even if a catalogue entry is renamed or removed in a later BSData update.
 
-Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`, or `/app/data/uploads/inventory/{inventory_item_id}/` in Docker. They are served locally by the app under `/uploads/...` and are not sent anywhere.
+Uploaded images are stored in S3-compatible object storage. In local Compose this is MinIO; the app serves authenticated image requests back under `/uploads/...`.
 
 ## Importer notes
 

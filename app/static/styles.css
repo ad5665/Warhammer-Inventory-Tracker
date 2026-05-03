@@ -141,6 +141,18 @@ body {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+.auth-status {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-right: auto;
+}
+.auth-link {
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+.auth-link:hover { text-decoration: underline; }
 .theme-control select {
   width: min(220px, 50vw);
   min-width: 0;
@@ -221,11 +233,68 @@ h2 { font-size: 1.2rem; margin-bottom: 8px; }
   box-shadow: 0 8px 24px rgba(var(--accent-rgb), 0.18);
 }
 
+.add-actions-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+}
+.add-actions-panel .hint {
+  margin: 6px 0 0;
+}
+.add-action-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.modal-dialog {
+  width: min(940px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+}
+.modal-dialog::backdrop {
+  background: rgba(2, 5, 11, 0.72);
+  backdrop-filter: blur(5px);
+}
+.modal-window {
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: rgba(var(--panel-rgb), 0.98);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.55);
+}
+.modal-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.modal-heading .ghost {
+  flex: 0 0 auto;
+}
+
 .section-heading {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 18px;
+}
+.csv-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  align-items: center;
+}
+.import-csv-button {
+  cursor: pointer;
 }
 
 .grid.two-col {
@@ -718,7 +787,7 @@ td textarea { min-width: 220px; }
 .toast.ok { background: var(--ok); color: var(--ok-text); }
 
 @media (max-width: 860px) {
-  .hero, .grid.two-col, .section-heading { grid-template-columns: 1fr; display: grid; }
+  .hero, .grid.two-col, .section-heading, .add-actions-panel { grid-template-columns: 1fr; display: grid; }
   .hero { padding-top: 82px; }
   .theme-control {
     justify-content: stretch;
@@ -727,6 +796,22 @@ td textarea { min-width: 220px; }
   .theme-control select { flex: 1; width: auto; }
   .form-row, .form-row.three, .form-row.two { grid-template-columns: 1fr; }
   .section-heading { align-items: stretch; }
+  .add-action-buttons { display: grid; grid-template-columns: 1fr; }
+  .csv-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .modal-dialog {
+    width: min(100vw - 20px, 940px);
+    max-height: calc(100vh - 20px);
+  }
+  .modal-window {
+    max-height: calc(100vh - 20px);
+    padding: 16px;
+    border-radius: 16px;
+  }
+  .modal-heading {
+    align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
   .game-tabs { width: 100%; }
   .game-tabs .tab { flex: 1; }
   .summary-header { display: grid; align-items: start; }
