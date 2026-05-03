@@ -16,3 +16,6 @@ dist/
 *.log
 *.bak
 *.tmp
+android/.gradle/
+android/local.properties
+android/app/build/
