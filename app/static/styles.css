@@ -706,12 +706,14 @@ td textarea { min-width: 220px; }
   padding: 12px 14px;
   border-radius: 14px;
   box-shadow: var(--shadow);
-  transform: translateY(140%);
-  transition: transform 0.2s ease;
+  opacity: 0;
+  transform: translateY(calc(100% + 40px));
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  visibility: hidden;
   font-weight: 700;
   z-index: 10;
 }
-.toast.show { transform: translateY(0); }
+.toast.show { opacity: 1; transform: translateY(0); visibility: visible; }
 .toast.error { background: var(--danger); color: var(--danger-text); }
 .toast.ok { background: var(--ok); color: var(--ok-text); }
 
