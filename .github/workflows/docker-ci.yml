@@ -30,12 +30,47 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
+          python -m pip install -r requirements.txt pytest pytest-cov
 
       - name: Run app tests
         run: |
           python -m compileall app
-          python -m pytest
+          python -m pytest --cov=app --cov-report=term-missing --cov-report=xml
+
+      - name: Add coverage summary
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("coverage.xml").getroot()
+          total_rate = float(root.attrib["line-rate"]) * 100
+          branch_rate = float(root.attrib.get("branch-rate", 0)) * 100
+          lines_valid = int(root.attrib.get("lines-valid", 0))
+          lines_covered = int(root.attrib.get("lines-covered", 0))
+          branches_valid = int(root.attrib.get("branches-valid", 0))
+          branches_covered = int(root.attrib.get("branches-covered", 0))
+
+          file_rows = []
+          for file_node in root.findall("./packages/package/classes/class"):
+              filename = file_node.attrib["filename"]
+              line_rate = float(file_node.attrib["line-rate"]) * 100
+              file_branch_rate = float(file_node.attrib.get("branch-rate", 0)) * 100
+              file_rows.append((filename, line_rate, file_branch_rate))
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as summary:
+              summary.write("## Test coverage\n\n")
+              summary.write("| Metric | Covered | Total | Coverage |\n")
+              summary.write("| --- | ---: | ---: | ---: |\n")
+              summary.write(f"| Lines | {lines_covered} | {lines_valid} | {total_rate:.1f}% |\n")
+              summary.write(f"| Branches | {branches_covered} | {branches_valid} | {branch_rate:.1f}% |\n\n")
+              if file_rows:
+                  summary.write("| File | Line coverage | Branch coverage |\n")
+                  summary.write("| --- | ---: | ---: |\n")
+                  for filename, line_rate, file_branch_rate in sorted(file_rows):
+                      summary.write(f"| `{filename}` | {line_rate:.1f}% | {file_branch_rate:.1f}% |\n")
+          PY
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4

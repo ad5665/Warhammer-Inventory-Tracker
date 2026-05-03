@@ -12,3 +12,11 @@ dependencies = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
