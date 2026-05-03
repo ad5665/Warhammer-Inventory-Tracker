@@ -204,19 +204,6 @@ Main endpoints:
 
 Uploaded images are stored under `data/uploads/inventory/{inventory_item_id}/`, or `/app/data/uploads/inventory/{inventory_item_id}/` in Docker. They are served locally by the app under `/uploads/...` and are not sent anywhere.
 
-## Upgrading from the first version
-
-The app performs lightweight SQLite migrations on startup:
-
-- Adds `game_system` columns so existing 40k inventory remains under `wh40k_10e`.
-- Adds `wargear`, `wargear_selections_json`, and `model_number` columns.
-- Adds the `inventory_images` table for local photo uploads.
-- Adds `inventory_copies` and links uploaded images to the relevant per-quantity copy when available.
-- Adds `auth_users` and `auth_sessions` for optional local login protection.
-- Adds `owner_user_id` to inventory rows. On the first auth-enabled startup after upgrading, existing unowned inventory is assigned to the first admin account.
-
-Keep a copy of `data/stock_tracker.db` before upgrading if you want an easy rollback.
-
 ## Importer notes
 
 The original importer only accepted catalogue entries marked exactly as `type="unit"`. This version also imports `type="model"` entries, which helps with character entries such as Chaos Lords and with Kill Team operative-style entries. It still ignores entries marked as upgrades/wargear.

@@ -9,3 +9,10 @@ data/*.db-*
 data/uploads/
 data/bsdata/
 .codex
+*.egg-info/
+build/
+dist/
+*.egg
+*.log
+*.bak
+*.tmp
