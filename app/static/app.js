@@ -274,6 +274,67 @@ function componentCountText(component) {
   return "";
 }
 
+function componentNamePattern(name) {
+  const escaped = String(name || "")
+    .trim()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  if (!escaped) return null;
+  return new RegExp(`\\b(\\d+)\\s+${escaped}s?\\b`, "i");
+}
+
+function componentChoiceCounts(component, choiceLabels) {
+  const pattern = componentNamePattern(component?.name);
+  if (!pattern) return [];
+
+  const counts = [];
+  const seen = new Set();
+  for (const label of choiceLabels) {
+    const match = String(label || "").match(pattern);
+    if (!match) continue;
+    const count = Number(match[1]);
+    if (!Number.isFinite(count) || seen.has(count)) continue;
+    seen.add(count);
+    counts.push(count);
+  }
+  return counts;
+}
+
+function joinChoiceCounts(counts) {
+  if (!counts.length) return "";
+  if (counts.length === 1) return String(counts[0]);
+  if (counts.length === 2) return `${counts[0]} or ${counts[1]}`;
+  return `${counts.slice(0, -1).join(", ")} or ${counts[counts.length - 1]}`;
+}
+
+function compositionChoiceLabels(components) {
+  return components.flatMap(component => component.composition_options || []);
+}
+
+function compositionNameIndex(name, label) {
+  const pattern = componentNamePattern(name);
+  if (!pattern) return Number.MAX_SAFE_INTEGER;
+  const match = pattern.exec(String(label || ""));
+  return match ? match.index : Number.MAX_SAFE_INTEGER;
+}
+
+function visibleCompositionComponents(components) {
+  const visible = components.filter(component => component.display_in_composition !== false);
+  const choiceLabels = compositionChoiceLabels(visible);
+  const modelChoices = components
+    .filter(component => component.display_in_composition === false && String(component.name || "").trim())
+    .map((component, index) => ({ component, index }))
+    .sort((left, right) => {
+      const firstLabel = choiceLabels[0] || "";
+      const leftIndex = compositionNameIndex(left.component.name, firstLabel);
+      const rightIndex = compositionNameIndex(right.component.name, firstLabel);
+      return leftIndex - rightIndex || left.index - right.index;
+    })
+    .map(({ component }) => component);
+
+  return choiceLabels.length && modelChoices.length ? modelChoices : visible;
+}
+
 function wargearNames(options, limit = 8) {
   const names = [];
   const seen = new Set();
@@ -290,32 +351,29 @@ function wargearNames(options, limit = 8) {
 }
 
 function renderModelComposition(unit, options = {}) {
-  const components = (unit.model_composition || [])
-    .filter(component => component.display_in_composition !== false);
+  const allComponents = unit.model_composition || [];
+  const components = visibleCompositionComponents(allComponents);
   if (!components.length) return "";
 
   const className = ["composition-list", options.className].filter(Boolean).join(" ");
   const wargearLimit = options.wargearLimit ?? 8;
   const collapsibleWargear = Boolean(options.collapsibleWargear);
+  const choiceLabels = compositionChoiceLabels(allComponents);
   return `
     <div class="${className}">
       ${components.map(component => {
-        const count = componentCountText(component);
+        const choiceCount = joinChoiceCounts(componentChoiceCounts(component, choiceLabels));
+        const count = choiceCount || componentCountText(component);
         const gear = wargearNames(component.wargear_options || [], wargearLimit);
         const title = `${count ? `${esc(count)} ` : ""}${esc(component.name)}`;
         const compositionOptions = component.composition_options || [];
         if (compositionOptions.length) {
-          return `
-            <div class="composition-row composition-choice-row">
-              <strong>${esc(component.name).toUpperCase()}</strong>
-              <div class="composition-choice-list">
-                ${compositionOptions.map((option, index) => `
-                  ${index ? '<span class="composition-choice-separator">OR</span>' : ""}
-                  <span>${esc(option)}</span>
-                `).join("")}
-              </div>
+          return compositionOptions.map((option, index) => `
+            <div class="composition-row composition-option-row">
+              <strong>${esc(option)}</strong>
+              ${index ? '<small class="composition-choice-separator">OR</small>' : ""}
             </div>
-          `;
+          `).join("");
         }
         if (collapsibleWargear && gear) {
           return `

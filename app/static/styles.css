@@ -235,19 +235,9 @@ input:disabled.locked-number {
 .composition-row strong {
   font-size: 0.82rem;
 }
-.composition-choice-row {
-  gap: 8px;
-}
-.composition-choice-list {
-  display: grid;
-  gap: 4px;
-  color: var(--muted);
-  line-height: 1.35;
-}
-.composition-choice-separator {
-  color: var(--accent);
-  font-size: 0.7rem;
-  font-weight: 800;
+.composition-option-row {
+  position: relative;
+  padding-right: 36px;
 }
 .composition-row-collapsible {
   display: block;
@@ -276,6 +266,16 @@ input:disabled.locked-number {
   line-height: 1.35;
   overflow-wrap: anywhere;
   margin-top: 3px;
+}
+.composition-option-row .composition-choice-separator {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+  margin-top: 0;
 }
 .inventory-composition {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
