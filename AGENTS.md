@@ -22,6 +22,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Install test and coverage tooling:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 Run the development server with reload at `http://127.0.0.1:8000`:
 
 ```bash
