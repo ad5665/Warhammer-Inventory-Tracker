@@ -1,0 +1,24 @@
+aws_region               = "eu-west-2"
+availability_zone_suffix = "a"
+ip_address_type          = "ipv4"
+
+# Replace with your public SSH key path.
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# Replace with your current public IP address, for example ["203.0.113.10/32"].
+# Leaving 0.0.0.0/0 works but exposes SSH to the internet.
+ssh_cidrs = ["0.0.0.0/0"]
+
+# Optional custom hostname. Caddy will request a Let's Encrypt certificate when this is set
+# and DNS points to the static IP.
+domain_name     = ""
+route53_zone_id = null
+
+container_image = "ad5665/warhammer-inventory-tracker:latest"
+auth_enabled    = true
+admin_username  = "admin"
+session_days    = 30
+
+# Optional off-instance recovery point. Snapshot storage is billed separately.
+enable_auto_snapshot = false
+auto_snapshot_time   = "04:00"

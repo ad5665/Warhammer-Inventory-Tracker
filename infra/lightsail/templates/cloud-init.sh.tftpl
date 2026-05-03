@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/opt/wh40k-stock-tracker"
+DATA_DIR="$APP_DIR/data"
+BACKUP_DIR="$APP_DIR/backups"
+
+export DEBIAN_FRONTEND=noninteractive
+
+mkdir -p "$DATA_DIR" "$BACKUP_DIR" "$APP_DIR/caddy_data" "$APP_DIR/caddy_config"
+chmod 750 "$APP_DIR" "$DATA_DIR" "$BACKUP_DIR"
+
+apt-get update
+apt-get install -y ca-certificates curl gnupg sqlite3 unattended-upgrades
+
+install -m 0755 -d /etc/apt/keyrings
+if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+fi
+
+. /etc/os-release
+cat >/etc/apt/sources.list.d/docker.list <<DOCKER_REPO
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable
+DOCKER_REPO
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+systemctl enable --now unattended-upgrades || true
+usermod -aG docker ubuntu || true
+
+cat >"$APP_DIR/.env" <<APP_ENV
+WH40K_AUTH_ENABLED=${auth_enabled}
+WH40K_COOKIE_SECURE=${cookie_secure}
+WH40K_ADMIN_USERNAME=${admin_username}
+WH40K_SESSION_DAYS=${session_days}
+WH40K_PORT=8000
+WH40K_DATA_DIR=/app/data
+APP_ENV
+chmod 600 "$APP_DIR/.env"
+
+cat >"$APP_DIR/Caddyfile" <<CADDYFILE
+${caddy_site_address} {
+	encode gzip
+	reverse_proxy app:8000
+}
+CADDYFILE
+
+cat >"$APP_DIR/docker-compose.yml" <<COMPOSE
+services:
+  app:
+    image: ${container_image}
+    container_name: wh40k-stock-tracker
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: wh40k-stock-tracker-caddy
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy_data:/data
+      - ./caddy_config:/config
+COMPOSE
+
+cat >/usr/local/bin/wh40k-backup <<'BACKUP'
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/opt/wh40k-stock-tracker"
+DATA_DIR="$APP_DIR/data"
+BACKUP_DIR="$APP_DIR/backups"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+WORK_DIR="$(mktemp -d)"
+
+cleanup() {
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
+mkdir -p "$BACKUP_DIR"
+
+if [ -f "$DATA_DIR/stock_tracker.db" ]; then
+  sqlite3 "$DATA_DIR/stock_tracker.db" ".backup '$WORK_DIR/stock_tracker.db'"
+fi
+
+if [ -d "$DATA_DIR/uploads" ]; then
+  tar -C "$DATA_DIR" -czf "$WORK_DIR/uploads.tar.gz" uploads
+fi
+
+if [ -n "$(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  tar -C "$WORK_DIR" -czf "$BACKUP_DIR/wh40k-$STAMP.tar.gz" .
+fi
+
+find "$BACKUP_DIR" -type f -name 'wh40k-*.tar.gz' -mtime +${backup_retention_days} -delete
+BACKUP
+chmod 750 /usr/local/bin/wh40k-backup
+
+cat >/etc/cron.d/wh40k-stock-tracker-backup <<CRON
+17 3 * * * root /usr/local/bin/wh40k-backup >> /var/log/wh40k-backup.log 2>&1
+CRON
+chmod 644 /etc/cron.d/wh40k-stock-tracker-backup
+
+cd "$APP_DIR"
+docker compose pull
+docker compose up -d
+
+/usr/local/bin/wh40k-backup || true

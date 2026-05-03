@@ -142,6 +142,21 @@ Useful auth environment variables:
 - `WH40K_SESSION_DAYS=30` - login session lifetime.
 - `WH40K_COOKIE_SECURE=true` - use this when serving only over HTTPS.
 
+## AWS Lightsail deployment
+
+Terraform for a low-cost AWS Lightsail deployment lives in `infra/lightsail/`. It provisions a Lightsail instance, static IP, Lightsail firewall rules, imported SSH key, Docker Compose app runtime, Caddy reverse proxy, local backups, and optional Route 53 DNS.
+
+Start there with:
+
+```bash
+cd infra/lightsail
+cp terraform.tfvars.example terraform.tfvars
+terraform init
+terraform plan
+```
+
+Before applying, edit `terraform.tfvars` and restrict `ssh_cidrs` to your public IP address.
+
 ## How syncing works
 
 The app tries to use `git` first. Later syncs use `git pull --ff-only`.

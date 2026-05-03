@@ -16,6 +16,11 @@ dist/
 *.log
 *.bak
 *.tmp
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
 android/.gradle/
 android/local.properties
 android/app/build/
