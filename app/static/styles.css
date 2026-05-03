@@ -200,15 +200,6 @@ h2 { font-size: 1.2rem; margin-bottom: 8px; }
 .status-line span { color: var(--muted); }
 .status-line strong { text-align: right; }
 
-.status-actions {
-  display: grid;
-  padding-top: 14px;
-}
-
-.status-actions button {
-  width: 100%;
-}
-
 .game-tabs {
   display: flex;
   gap: 10px;

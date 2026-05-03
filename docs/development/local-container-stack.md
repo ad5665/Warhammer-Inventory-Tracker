@@ -68,7 +68,7 @@ The dev stack uses the target local services directly:
 - `OIDC_INTERNAL_ISSUER_URL=http://keycloak:8080/realms/wh40k`
 - `OIDC_CLIENT_ID=wh40k-web`
 
-Uploaded photos are written to MinIO and served back through the app's `/uploads/...` routes. Inventory, catalogue imports, users, sessions, and image metadata are written to Postgres. `/app/data` remains for BSData clone/download working files.
+Uploaded photos are written to MinIO and served back through the app's `/uploads/...` routes. Inventory, catalogue imports, users, sessions, and image metadata are written to Postgres. BSData sync runs when the app starts and then at local midnight; `/app/data` remains for BSData clone/download working files.
 
 Keycloak stores its data in the same Postgres container under the `keycloak` schema. The `keycloak-realm-init` service creates the `wh40k` realm from `infra/keycloak/wh40k-realm.json` when it is missing, with public registration enabled, and applies `infra/keycloak/wh40k-user-profile.json` so signup asks for username, email, and password only. The app validates OIDC JWTs and creates a local `auth_users` row on first valid login.
 

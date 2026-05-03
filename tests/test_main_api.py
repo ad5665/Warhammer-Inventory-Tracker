@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -28,6 +29,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "BSDATA_ROOT", data_dir / "bsdata")
     monkeypatch.setattr(main, "AUTH_ENABLED", False)
     monkeypatch.setattr(main, "AUTH_PROVIDER", "local")
+    monkeypatch.setattr(main, "BSDATA_AUTO_SYNC_ENABLED", False)
 
     with TestClient(main.app) as test_client:
         yield test_client
@@ -44,7 +46,10 @@ def auth_client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "AUTH_COOKIE_SECURE", False)
     monkeypatch.setattr(main, "AUTH_SESSION_DAYS", 1)
     monkeypatch.setattr(main, "INITIAL_ADMIN_USERNAME", "Root.Admin")
-    monkeypatch.setattr(main.secrets, "token_urlsafe", lambda length: "temporary-admin-password")
+    monkeypatch.setattr(main, "BSDATA_AUTO_SYNC_ENABLED", False)
+    monkeypatch.setattr(
+        main.secrets, "token_urlsafe", lambda length: "temporary-admin-password"
+    )
 
     with TestClient(main.app) as test_client:
         yield test_client
@@ -66,9 +71,9 @@ def _insert_catalogue_unit(
                 points, min_models, max_models, keywords, stats_json,
                 wargear_options_json, model_composition_json, active, imported_at
             ) VALUES (
-                ?, 'wh40k_10e', 'unit-1', ?, ?, 'Space Marines.cat', 'unit',
-                90, 5, 10, 'Infantry, Battleline', ?,
-                ?, ?, 1, ?
+                %s, 'wh40k_10e', 'unit-1', %s, %s, 'Space Marines.cat', 'unit',
+                90, 5, 10, 'Infantry, Battleline', %s,
+                %s, %s, 1, %s
             )
             RETURNING id
             """,
@@ -94,7 +99,11 @@ def test_status_game_systems_units_and_factions(client):
     assert status["inventory_count"] == 0
 
     systems = client.get("/api/game-systems").json()
-    assert {system["id"] for system in systems} >= {"wh40k_10e", "kill_team", "age_of_sigmar_4e"}
+    assert {system["id"] for system in systems} >= {
+        "wh40k_10e",
+        "kill_team",
+        "age_of_sigmar_4e",
+    }
 
     factions = client.get("/api/factions").json()
     assert factions == [{"faction": "Heretic Astartes", "unit_count": 1}]
@@ -171,12 +180,20 @@ def test_inventory_lifecycle_copy_progress_export_and_delete(client):
     assert delete_response.status_code == 204
     assert client.get("/api/inventory").json() == []
     with db.connect() as conn:
-        deleted = conn.execute("SELECT deleted_at FROM inventory_items WHERE id = ?", (item["id"],)).fetchone()
+        deleted = conn.execute(
+            "SELECT deleted_at FROM inventory_items WHERE id = %s", (item["id"],)
+        ).fetchone()
     assert deleted["deleted_at"] is not None
 
     import_response = client.post(
         "/api/import.csv",
-        files={"file": ("warhammer_inventory_wh40k_10e.csv", export_response.text, "text/csv")},
+        files={
+            "file": (
+                "warhammer_inventory_wh40k_10e.csv",
+                export_response.text,
+                "text/csv",
+            )
+        },
     )
     assert import_response.status_code == 200
     assert import_response.json()["updated"] == 1
@@ -229,14 +246,21 @@ def test_inventory_item_update_reseeds_copies_and_handles_missing_item(client):
     assert updated["built_count"] == 6
     assert updated["painted_count"] == 3
 
-    missing = client.put("/api/inventory/999", json={"unit_name": "Missing", "quantity": 1})
+    missing = client.put(
+        "/api/inventory/999", json={"unit_name": "Missing", "quantity": 1}
+    )
     assert missing.status_code == 404
 
 
 def test_inventory_from_catalogue_unit_uses_wargear_selection_summary(client):
     unit_id = _insert_catalogue_unit(
         wargear_options=[
-            {"key": "bolt-rifle", "name": "Bolt rifle", "kind": "Ranged Weapons", "stats": {"Range": '24"'}},
+            {
+                "key": "bolt-rifle",
+                "name": "Bolt rifle",
+                "kind": "Ranged Weapons",
+                "stats": {"Range": '24"'},
+            },
         ],
         model_composition=[
             {
@@ -245,7 +269,12 @@ def test_inventory_from_catalogue_unit_uses_wargear_selection_summary(client):
                 "min_models": 1,
                 "max_models": 1,
                 "wargear_options": [
-                    {"key": "power-fist", "name": "Power fist", "kind": "Melee Weapons", "stats": {"A": "3"}},
+                    {
+                        "key": "power-fist",
+                        "name": "Power fist",
+                        "kind": "Melee Weapons",
+                        "stats": {"A": "3"},
+                    },
                 ],
                 "composition_options": ["Sergeant"],
             }
@@ -307,7 +336,9 @@ def test_inventory_image_upload_download_and_delete(client):
     assert delete_response.status_code == 204
     assert client.get(image["url"]).status_code == 404
     with db.connect() as conn:
-        deleted = conn.execute("SELECT deleted_at FROM inventory_images WHERE id = ?", (image["id"],)).fetchone()
+        deleted = conn.execute(
+            "SELECT deleted_at FROM inventory_images WHERE id = %s", (image["id"],)
+        ).fetchone()
     assert deleted["deleted_at"] is not None
 
 
@@ -340,11 +371,17 @@ def test_inventory_image_upload_errors(client, monkeypatch):
 
 
 def test_invalid_inputs_return_client_errors(client):
-    assert client.get("/api/status", params={"game_system": "bad-system"}).status_code == 400
+    assert (
+        client.get("/api/status", params={"game_system": "bad-system"}).status_code
+        == 400
+    )
 
     missing_name = client.post("/api/inventory", json={"quantity": 1})
     assert missing_name.status_code == 400
-    assert missing_name.json()["detail"] == "unit_name is required for custom inventory items."
+    assert (
+        missing_name.json()["detail"]
+        == "unit_name is required for custom inventory items."
+    )
 
     missing_unit = client.post("/api/inventory", json={"unit_id": 999, "quantity": 1})
     assert missing_unit.status_code == 404
@@ -367,7 +404,9 @@ def test_sync_records_success_and_failure(client, monkeypatch):
         return SyncResult(str(target_dir), "synced", used_git=True)
 
     def fake_import_bsdata(conn, repo_dir, game_system):
-        return ImportResult(files_scanned=2, units_imported=3, errors=["bad.cat: invalid"])
+        return ImportResult(
+            files_scanned=2, units_imported=3, errors=["bad.cat: invalid"]
+        )
 
     monkeypatch.setattr(main, "sync_repository", fake_sync_repository)
     monkeypatch.setattr(main, "import_bsdata", fake_import_bsdata)
@@ -388,9 +427,56 @@ def test_sync_records_success_and_failure(client, monkeypatch):
     with db.connect() as conn:
         statuses = [
             row["status"]
-            for row in conn.execute("SELECT status FROM import_runs ORDER BY id").fetchall()
+            for row in conn.execute(
+                "SELECT status FROM import_runs ORDER BY id"
+            ).fetchall()
         ]
     assert statuses == ["success_with_errors", "failed"]
+
+
+def test_admin_portal_can_sync_all_bsdata(auth_client, monkeypatch):
+    login = auth_client.post(
+        "/auth/login",
+        data={
+            "username": "root.admin",
+            "password": "temporary-admin-password",
+            "next_url": "/admin",
+        },
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    auth_client.post(
+        "/admin/password",
+        data={
+            "new_password": "permanent-password",
+            "confirm_password": "permanent-password",
+        },
+    )
+
+    calls = []
+
+    def fake_sync_repository(target_dir, config):
+        calls.append(config.id)
+        return SyncResult(str(target_dir), "synced", used_git=True)
+
+    def fake_import_bsdata(conn, repo_dir, game_system):
+        return ImportResult(files_scanned=1, units_imported=2, errors=[])
+
+    monkeypatch.setattr(main, "sync_repository", fake_sync_repository)
+    monkeypatch.setattr(main, "import_bsdata", fake_import_bsdata)
+
+    admin_page = auth_client.get("/admin")
+    assert "Sync BSData" in admin_page.text
+
+    response = auth_client.post("/admin/bsdata/sync")
+    assert response.status_code == 200
+    assert "BSData sync completed. Imported 6 entries from 3 files." in response.text
+    assert calls == list(main.GAME_SYSTEMS.keys())
+
+
+def test_bsdata_midnight_delay_helper():
+    now = datetime(2026, 5, 3, 23, 30, tzinfo=timezone.utc)
+    assert main._seconds_until_next_midnight(now) == 30 * 60
 
 
 def test_auth_admin_login_password_user_creation_and_logout(auth_client):
@@ -442,7 +528,9 @@ def test_auth_admin_login_password_user_creation_and_logout(auth_client):
     assert auth_info["user"]["must_change_password"] is False
     assert auth_info["preferences"]["theme"] == "default"
 
-    theme_update = auth_client.put("/api/auth/preferences", json={"theme": "night-lords"})
+    theme_update = auth_client.put(
+        "/api/auth/preferences", json={"theme": "night-lords"}
+    )
     assert theme_update.status_code == 200
     assert theme_update.json() == {"theme": "night-lords"}
     saved_auth_info = auth_client.get("/api/auth/me").json()
@@ -479,7 +567,12 @@ def test_auth_validation_and_small_formatting_helpers(monkeypatch, tmp_path):
     assert main._verify_password("correct horse", password_hash) is True
     assert main._verify_password("wrong horse", password_hash) is False
     assert main._verify_password("anything", "not-a-valid-hash") is False
-    assert main._verify_password("anything", password_hash.replace("pbkdf2_sha256", "unknown", 1)) is False
+    assert (
+        main._verify_password(
+            "anything", password_hash.replace("pbkdf2_sha256", "unknown", 1)
+        )
+        is False
+    )
     assert len(main._session_token_hash("token")) == 64
 
     assert main._clean_username(" Test.User ") == "test.user"
@@ -493,48 +586,80 @@ def test_auth_validation_and_small_formatting_helpers(monkeypatch, tmp_path):
     assert main._safe_next_url("/inventory?unit=1") == "/inventory?unit=1"
     assert main._safe_next_url("https://example.com") == "/"
     assert main._safe_next_url("//example.com") == "/"
-    assert main._inventory_owner_clause(None) == ("i.owner_user_id IS NULL AND i.deleted_at IS NULL", [])
-    assert main._inventory_owner_clause(7, alias="") == ("owner_user_id = ? AND deleted_at IS NULL", [7])
-    monkeypatch.setenv("WH40K_CSV_VALUES", " http://localhost:5173, ,exp://127.0.0.1:8081 ")
-    assert main._csv_env_values("WH40K_CSV_VALUES") == ["http://localhost:5173", "exp://127.0.0.1:8081"]
+    assert main._inventory_owner_clause(None) == (
+        "i.owner_user_id IS NULL AND i.deleted_at IS NULL",
+        [],
+    )
+    assert main._inventory_owner_clause(7, alias="") == (
+        "owner_user_id = %s AND deleted_at IS NULL",
+        [7],
+    )
+    claims = main._merge_oidc_role_claims(
+        {"sub": "user-1", "realm_access": {"roles": ["offline_access"]}},
+        {"resource_access": {"wh40k-web": {"roles": ["wh40k-admin"]}}},
+    )
+    assert "wh40k-admin" in main._oidc_role_names(claims)
+    monkeypatch.setenv(
+        "WH40K_CSV_VALUES", " http://localhost:5173, ,exp://127.0.0.1:8081 "
+    )
+    assert main._csv_env_values("WH40K_CSV_VALUES") == [
+        "http://localhost:5173",
+        "exp://127.0.0.1:8081",
+    ]
 
     assert main._decode_wargear_options(None) == []
     assert main._decode_wargear_options("{bad") == []
     assert main._wargear_options_from_payload("bad") == []
-    assert main._wargear_options_from_payload([{"key": " k ", "name": " Name ", "stats": {"A": 3, "B": None}}]) == [
-        {"key": "k", "name": "Name", "kind": "Weapon", "stats": {"A": "3"}}
-    ]
+    assert main._wargear_options_from_payload(
+        [{"key": " k ", "name": " Name ", "stats": {"A": 3, "B": None}}]
+    ) == [{"key": "k", "name": "Name", "kind": "Weapon", "stats": {"A": "3"}}]
     assert main._decode_model_composition("{bad") == []
     assert main._decode_model_composition(json.dumps({"not": "a list"})) == []
     assert main._safe_optional_int("-1") is None
     assert main._safe_optional_int("bad") is None
     assert main._clean_wargear_selections("bad") == {}
-    assert main._clean_wargear_selections({"": 2, "large": 1200, "bad": "many"}) == {"large": 999}
+    assert main._clean_wargear_selections({"": 2, "large": 1200, "bad": "many"}) == {
+        "large": 999
+    }
     assert main._decode_wargear_selections("{bad") == {}
 
     assert main._wargear_text(None) == ""
     assert main._wargear_text("plain notes") == "plain notes"
-    assert main._wargear_text(json.dumps(["not", "dict"])) == json.dumps(["not", "dict"])
-    assert main._wargear_text(
-        json.dumps(
-            {
-                "selected": [
-                    {"name": "Bolt rifle", "quantity": 2},
-                    {"name": "", "quantity": 3},
-                    {"name": "Ignored", "quantity": "bad"},
-                ],
-                "notes": " Extra ammo ",
-            }
+    assert main._wargear_text(json.dumps(["not", "dict"])) == json.dumps(
+        ["not", "dict"]
+    )
+    assert (
+        main._wargear_text(
+            json.dumps(
+                {
+                    "selected": [
+                        {"name": "Bolt rifle", "quantity": 2},
+                        {"name": "", "quantity": 3},
+                        {"name": "Ignored", "quantity": "bad"},
+                    ],
+                    "notes": " Extra ammo ",
+                }
+            )
         )
-    ) == "2 x Bolt rifle; Extra ammo"
+        == "2 x Bolt rifle; Extra ammo"
+    )
 
     main._delete_image_file(1, "missing.png")
     assert main._safe_image_role("Painted") == "painted"
     assert main._safe_image_role("invalid") == "other"
-    assert main._safe_image_ext(DummyUpload("x.any", "image/webp; charset=binary")) == ".webp"
-    assert main._safe_image_ext(DummyUpload("photo.jpeg", "application/octet-stream")) == ".jpg"
+    assert (
+        main._safe_image_ext(DummyUpload("x.any", "image/webp; charset=binary"))
+        == ".webp"
+    )
+    assert (
+        main._safe_image_ext(DummyUpload("photo.jpeg", "application/octet-stream"))
+        == ".jpg"
+    )
     assert main._original_name(None) is None
-    assert main._original_name("../" + ("x" * 300) + ".png") == (("x" * 300) + ".png")[:240]
+    assert (
+        main._original_name("../" + ("x" * 300) + ".png")
+        == (("x" * 300) + ".png")[:240]
+    )
     with pytest.raises(HTTPException) as upload_exc:
         main._safe_image_ext(DummyUpload("notes.txt", "text/plain"))
     assert upload_exc.value.status_code == 400

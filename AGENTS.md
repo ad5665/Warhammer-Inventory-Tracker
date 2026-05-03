@@ -2,10 +2,10 @@
 
 ## Project Structure & Module Organization
 
-This is a small FastAPI and SQLite application with a vanilla frontend.
+This is a small FastAPI and Postgres application with a vanilla frontend.
 
 - `app/main.py` defines the web app, API routes, auth flow, uploads, and CSV export.
-- `app/db.py` owns SQLite setup, migrations, and persistence helpers.
+- `app/db.py` owns Postgres setup, migrations, and persistence helpers.
 - `app/bsdata.py` parses BSData catalogue XML into importable unit records.
 - `app/static/` contains the browser UI: `index.html`, `app.js`, and `styles.css`.
 - `tests/` contains pytest coverage for parser and summary behavior.
@@ -74,7 +74,7 @@ Recent commits use short imperative subject lines, for example `Hide inactive to
 
 ## Security & Configuration Tips
 
-Authentication is off by default. Use `WH40K_AUTH_ENABLED=true` for hosted deployments and `WH40K_COOKIE_SECURE=true` when serving only over HTTPS. Do not commit `data/stock_tracker.db`, uploaded images, temporary admin passwords, or cloned BSData catalogues.
+Authentication is off by default. Use `WH40K_AUTH_ENABLED=true` for hosted deployments and `WH40K_COOKIE_SECURE=true` when serving only over HTTPS. Do not commit uploaded images, temporary admin passwords, cloned BSData catalogues, or local runtime data.
 
 ## Unit Tests
 

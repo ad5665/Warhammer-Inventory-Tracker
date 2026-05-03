@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import base64
 import hashlib
@@ -7,12 +8,15 @@ import hmac
 import html
 import io
 import json
+import logging
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -35,12 +39,27 @@ from .bsdata import (
     import_bsdata,
     sync_repository,
 )
-from .db import DATA_DIR, _new_public_id, connect, database_label, init_db, table_count, utc_now_sql
-from .storage import ObjectNotFound, delete_object, get_object, put_object, storage_label
+from .db import (
+    DATA_DIR,
+    _new_public_id,
+    connect,
+    database_label,
+    init_db,
+    table_count,
+    utc_now_sql,
+)
+from .storage import (
+    ObjectNotFound,
+    delete_object,
+    get_object,
+    put_object,
+    storage_label,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 BSDATA_ROOT = DATA_DIR / "bsdata"
+LOGGER = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_CSV_IMPORT_BYTES = 2 * 1024 * 1024
@@ -116,17 +135,24 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 AUTH_ENABLED = _env_flag("WH40K_AUTH_ENABLED", False)
+BSDATA_AUTO_SYNC_ENABLED = _env_flag("WH40K_BSDATA_AUTO_SYNC_ENABLED", True)
 AUTH_COOKIE_SECURE = _env_flag("WH40K_COOKIE_SECURE", False)
 AUTH_SESSION_DAYS = max(1, int(os.getenv("WH40K_SESSION_DAYS", "30") or 30))
 INITIAL_ADMIN_USERNAME = os.getenv("WH40K_ADMIN_USERNAME", "admin").strip() or "admin"
 AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "local").strip().lower() or "local"
 OIDC_AUTH_PROVIDERS = {"oidc", "keycloak"}
 APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")
-OIDC_ISSUER_URL = os.getenv("OIDC_ISSUER_URL", "http://localhost:8081/realms/wh40k").rstrip("/")
-OIDC_INTERNAL_ISSUER_URL = os.getenv("OIDC_INTERNAL_ISSUER_URL", OIDC_ISSUER_URL).rstrip("/")
+OIDC_ISSUER_URL = os.getenv(
+    "OIDC_ISSUER_URL", "http://localhost:8081/realms/wh40k"
+).rstrip("/")
+OIDC_INTERNAL_ISSUER_URL = os.getenv(
+    "OIDC_INTERNAL_ISSUER_URL", OIDC_ISSUER_URL
+).rstrip("/")
 OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "wh40k-web").strip() or "wh40k-web"
 OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET", "").strip()
-OIDC_SCOPE = os.getenv("OIDC_SCOPE", "openid email profile").strip() or "openid email profile"
+OIDC_SCOPE = (
+    os.getenv("OIDC_SCOPE", "openid email profile").strip() or "openid email profile"
+)
 OIDC_ADMIN_ROLE = os.getenv("OIDC_ADMIN_ROLE", "wh40k-admin").strip() or "wh40k-admin"
 OIDC_STATE_COOKIE_NAME = "wh40k_oidc_state"
 OIDC_STATE_TTL_SECONDS = 10 * 60
@@ -139,6 +165,7 @@ def _csv_env_values(name: str) -> list[str]:
 
 
 CORS_ALLOWED_ORIGINS = _csv_env_values("WH40K_CORS_ORIGINS")
+_BSDATA_SYNC_LOCK = threading.Lock()
 
 
 class InventoryPayload(BaseModel):
@@ -245,7 +272,7 @@ def _clean_theme(theme: str | None) -> str:
 
 def _assign_unowned_inventory_to_admin(conn: Any, admin_id: int) -> None:
     conn.execute(
-        "UPDATE inventory_items SET owner_user_id = ? WHERE owner_user_id IS NULL",
+        "UPDATE inventory_items SET owner_user_id = %s WHERE owner_user_id IS NULL",
         (admin_id,),
     )
 
@@ -266,7 +293,7 @@ def ensure_initial_admin_user() -> None:
         temporary_password = secrets.token_urlsafe(18)
         now = utc_now_sql()
         existing = conn.execute(
-            "SELECT id FROM auth_users WHERE username = ?",
+            "SELECT id FROM auth_users WHERE username = %s",
             (username,),
         ).fetchone()
         if existing is None:
@@ -274,7 +301,7 @@ def ensure_initial_admin_user() -> None:
                 """
                 INSERT INTO auth_users (
                     username, password_hash, is_admin, must_change_password, created_at, updated_at
-                ) VALUES (?, ?, 1, 1, ?, ?)
+                ) VALUES (%s, %s, 1, 1, %s, %s)
                 RETURNING id
                 """,
                 (username, _password_hash(temporary_password), now, now),
@@ -284,8 +311,8 @@ def ensure_initial_admin_user() -> None:
             conn.execute(
                 """
                 UPDATE auth_users
-                SET password_hash = ?, is_admin = 1, must_change_password = 1, updated_at = ?
-                WHERE id = ?
+                SET password_hash = %s, is_admin = 1, must_change_password = 1, updated_at = %s
+                WHERE id = %s
                 """,
                 (_password_hash(temporary_password), now, existing["id"]),
             )
@@ -323,18 +350,72 @@ STATIC_ASSET_VERSION = _static_asset_version()
 def _versioned_index_html() -> str:
     asset_version = quote(STATIC_ASSET_VERSION, safe="")
     content = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    return (
-        content
-        .replace("/static/styles.css", f"/static/styles.css?v={asset_version}")
-        .replace("/static/app.js", f"/static/app.js?v={asset_version}")
+    return content.replace(
+        "/static/styles.css", f"/static/styles.css?v={asset_version}"
+    ).replace("/static/app.js", f"/static/app.js?v={asset_version}")
+
+
+def _seconds_until_next_midnight(now: datetime | None = None) -> float:
+    current = now if now is not None else datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.astimezone()
+    tomorrow = current.date() + timedelta(days=1)
+    next_midnight = datetime.combine(tomorrow, datetime_time.min, tzinfo=current.tzinfo)
+    return max(1.0, (next_midnight - current).total_seconds())
+
+
+def _sync_summary_text(result: dict[str, Any]) -> str:
+    imported = sum(
+        int(item.get("units_imported") or 0) for item in result.get("results", [])
     )
+    scanned = sum(
+        int(item.get("files_scanned") or 0) for item in result.get("results", [])
+    )
+    failures = result.get("failures", [])
+    if failures:
+        return f"BSData sync completed with {len(failures)} failure(s). Imported {imported} entries from {scanned} files."
+    return f"BSData sync completed. Imported {imported} entries from {scanned} files."
+
+
+async def _run_scheduled_bsdata_sync(reason: str) -> None:
+    try:
+        LOGGER.info("Starting %s BSData sync.", reason)
+        result = await asyncio.to_thread(_sync_all_game_systems)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            LOGGER.info(
+                "Skipped %s BSData sync because another sync is already running.",
+                reason,
+            )
+            return
+        LOGGER.warning("%s BSData sync failed: %s", reason.capitalize(), exc.detail)
+    except Exception:
+        LOGGER.exception("%s BSData sync failed.", reason.capitalize())
+    else:
+        LOGGER.info("%s", _sync_summary_text(result))
+
+
+async def _bsdata_auto_sync_loop() -> None:
+    await _run_scheduled_bsdata_sync("startup")
+    while True:
+        await asyncio.sleep(_seconds_until_next_midnight())
+        await _run_scheduled_bsdata_sync("midnight")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     ensure_initial_admin_user()
-    yield
+    sync_task: asyncio.Task[None] | None = None
+    if BSDATA_AUTO_SYNC_ENABLED:
+        sync_task = asyncio.create_task(_bsdata_auto_sync_loop())
+    try:
+        yield
+    finally:
+        if sync_task is not None:
+            sync_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sync_task
 
 
 app = FastAPI(
@@ -380,11 +461,13 @@ def _public_auth_path(path: str) -> bool:
 
 def _request_target(request: Request) -> str:
     path = request.url.path
-    return f"{path}?{request.url.query}" if request.url.query else path
+    return f"{path}%s{request.url.query}" if request.url.query else path
 
 
 def _login_redirect(request: Request) -> RedirectResponse:
-    return RedirectResponse(url=f"/login?next={quote(_request_target(request))}", status_code=303)
+    return RedirectResponse(
+        url=f"/login?next={quote(_request_target(request))}", status_code=303
+    )
 
 
 def _get_session_user(request: Request) -> dict[str, Any] | None:
@@ -400,18 +483,18 @@ def _get_session_user(request: Request) -> dict[str, Any] | None:
             SELECT u.*
             FROM auth_sessions s
             JOIN auth_users u ON u.id = s.user_id
-            WHERE s.token_hash = ?
+            WHERE s.token_hash = %s
             """,
             (token_hash,),
         ).fetchone()
         session = conn.execute(
-            "SELECT id, expires_at FROM auth_sessions WHERE token_hash = ?",
+            "SELECT id, expires_at FROM auth_sessions WHERE token_hash = %s",
             (token_hash,),
         ).fetchone()
         if session is None:
             return None
         if int(session["expires_at"]) <= now:
-            conn.execute("DELETE FROM auth_sessions WHERE id = ?", (session["id"],))
+            conn.execute("DELETE FROM auth_sessions WHERE id = %s", (session["id"],))
             return None
         return dict(row) if row is not None else None
 
@@ -453,7 +536,9 @@ def _decode_oidc_token(token: str, *, verify_audience: bool = True) -> dict[str,
             audiences = [audiences]
         authorized_party = claims.get("azp") or claims.get("client_id")
         if OIDC_CLIENT_ID not in audiences and authorized_party != OIDC_CLIENT_ID:
-            raise HTTPException(status_code=401, detail="Token was not issued for this client.")
+            raise HTTPException(
+                status_code=401, detail="Token was not issued for this client."
+            )
     return claims
 
 
@@ -467,7 +552,9 @@ def _unpack_oidc_state(value: str | None) -> dict[str, str] | None:
         return None
     try:
         padding = "=" * (-len(value) % 4)
-        data = json.loads(base64.urlsafe_b64decode((value + padding).encode("ascii")).decode("utf-8"))
+        data = json.loads(
+            base64.urlsafe_b64decode((value + padding).encode("ascii")).decode("utf-8")
+        )
     except (ValueError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
@@ -487,13 +574,52 @@ def _oidc_role_names(claims: dict[str, Any]) -> set[str]:
     resource_access = claims.get("resource_access")
     if isinstance(resource_access, dict):
         for client_access in resource_access.values():
-            if isinstance(client_access, dict) and isinstance(client_access.get("roles"), list):
+            if isinstance(client_access, dict) and isinstance(
+                client_access.get("roles"), list
+            ):
                 roles.update(str(role) for role in client_access["roles"])
     return roles
 
 
+def _merge_oidc_role_claims(
+    primary: dict[str, Any], secondary: dict[str, Any]
+) -> dict[str, Any]:
+    merged = dict(primary)
+    roles = _oidc_role_names(primary) | _oidc_role_names(secondary)
+    if not roles:
+        return merged
+
+    realm_access = merged.get("realm_access")
+    merged_realm_access = dict(realm_access) if isinstance(realm_access, dict) else {}
+    existing_roles = merged_realm_access.get("roles")
+    if isinstance(existing_roles, list):
+        roles.update(str(role) for role in existing_roles)
+    merged_realm_access["roles"] = sorted(roles)
+    merged["realm_access"] = merged_realm_access
+    return merged
+
+
+def _oidc_user_claims(id_token: str | None, access_token: str | None) -> dict[str, Any]:
+    if id_token:
+        claims = _decode_oidc_token(id_token, verify_audience=True)
+        if access_token:
+            access_claims = _decode_oidc_token(access_token, verify_audience=False)
+            return _merge_oidc_role_claims(claims, access_claims)
+        return claims
+    if access_token:
+        return _decode_oidc_token(access_token, verify_audience=False)
+    raise HTTPException(
+        status_code=401, detail="The identity provider did not return a token."
+    )
+
+
 def _oidc_username(claims: dict[str, Any]) -> str:
-    base = claims.get("preferred_username") or claims.get("email") or claims.get("sub") or "user"
+    base = (
+        claims.get("preferred_username")
+        or claims.get("email")
+        or claims.get("sub")
+        or "user"
+    )
     cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", ".", str(base).strip().lower()).strip("._-")
     if len(cleaned) < 3:
         cleaned = f"user-{secrets.token_hex(4)}"
@@ -504,7 +630,12 @@ def _unique_provider_username(conn: Any, username: str) -> str:
     root = username[:34].rstrip("._-") or "user"
     candidate = root
     suffix = 2
-    while conn.execute("SELECT id FROM auth_users WHERE username = ?", (candidate,)).fetchone() is not None:
+    while (
+        conn.execute(
+            "SELECT id FROM auth_users WHERE username = %s", (candidate,)
+        ).fetchone()
+        is not None
+    ):
         candidate = f"{root[:34]}-{suffix}"
         suffix += 1
     return candidate
@@ -513,16 +644,21 @@ def _unique_provider_username(conn: Any, username: str) -> str:
 def _upsert_oidc_user(claims: dict[str, Any]) -> dict[str, Any]:
     subject = str(claims.get("sub") or "").strip()
     if not subject:
-        raise HTTPException(status_code=401, detail="Identity token is missing a subject.")
+        raise HTTPException(
+            status_code=401, detail="Identity token is missing a subject."
+        )
 
     now = utc_now_sql()
     email = str(claims.get("email") or "").strip().lower() or None
-    display_name = str(claims.get("name") or claims.get("preferred_username") or "").strip() or None
+    display_name = (
+        str(claims.get("name") or claims.get("preferred_username") or "").strip()
+        or None
+    )
     is_admin = 1 if OIDC_ADMIN_ROLE in _oidc_role_names(claims) else 0
 
     with connect() as conn:
         existing = conn.execute(
-            "SELECT * FROM auth_users WHERE auth_provider = ? AND auth_subject = ?",
+            "SELECT * FROM auth_users WHERE auth_provider = %s AND auth_subject = %s",
             (AUTH_PROVIDER, subject),
         ).fetchone()
         if existing is None:
@@ -532,7 +668,7 @@ def _upsert_oidc_user(claims: dict[str, Any]) -> dict[str, Any]:
                 INSERT INTO auth_users (
                     username, password_hash, auth_provider, auth_subject, email, display_name,
                     is_admin, must_change_password, created_at, updated_at, last_login_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -554,16 +690,20 @@ def _upsert_oidc_user(claims: dict[str, Any]) -> dict[str, Any]:
             conn.execute(
                 """
                 UPDATE auth_users
-                SET email = ?,
-                    display_name = ?,
-                    is_admin = ?,
-                    updated_at = ?,
-                    last_login_at = ?
-                WHERE id = ?
+                SET email = %s,
+                    display_name = %s,
+                    is_admin = %s,
+                    updated_at = %s,
+                    last_login_at = %s
+                WHERE id = %s
                 """,
                 (email, display_name, is_admin, now, now, user_id),
             )
-        return dict(conn.execute("SELECT * FROM auth_users WHERE id = ?", (user_id,)).fetchone())
+        return dict(
+            conn.execute(
+                "SELECT * FROM auth_users WHERE id = %s", (user_id,)
+            ).fetchone()
+        )
 
 
 def _get_bearer_user(request: Request) -> dict[str, Any] | None:
@@ -614,7 +754,9 @@ async def auth_middleware(request: Request, call_next):
     password_change_allowed = path in {"/admin", "/admin/password", "/auth/logout"}
     if int(user.get("must_change_password") or 0) and not password_change_allowed:
         if path.startswith("/api"):
-            return JSONResponse({"detail": "Password change required."}, status_code=403)
+            return JSONResponse(
+                {"detail": "Password change required."}, status_code=403
+            )
         return RedirectResponse(url="/admin", status_code=303)
 
     return await call_next(request)
@@ -709,18 +851,35 @@ def _message_html(message: str | None, kind: str = "ok") -> str:
     return f'<div class="message {kind}">{_escape(message)}</div>'
 
 
+def _bsdata_admin_panel() -> str:
+    return """
+      <section class="panel">
+        <h2>BSData catalogue</h2>
+        <p>Catalogue data syncs automatically when the app starts and again at local midnight.</p>
+        <form method="post" action="/admin/bsdata/sync">
+          <button type="submit">Sync BSData</button>
+        </form>
+      </section>
+    """
+
+
 def _login_page(next_url: str = "/", error: str | None = None) -> HTMLResponse:
     if not auth_enabled():
-        return _html_page("Login", """
+        return _html_page(
+            "Login",
+            """
           <section class="panel">
             <h1>Authentication is disabled</h1>
             <p>This instance is currently running without login protection.</p>
             <a class="button-link" href="/">Open tracker</a>
           </section>
-        """)
+        """,
+        )
     if oidc_auth_enabled():
         encoded_next = quote(_safe_next_url(next_url), safe="")
-        return _html_page("Login", f"""
+        return _html_page(
+            "Login",
+            f"""
           <section class="panel">
             <h1>Warhammer Stock Tracker</h1>
             <p>Sign in with the identity provider to open the tracker.</p>
@@ -730,8 +889,11 @@ def _login_page(next_url: str = "/", error: str | None = None) -> HTMLResponse:
               <a class="button-link secondary" href="/signup?next={encoded_next}">Create account</a>
             </div>
           </section>
-        """)
-    return _html_page("Login", f"""
+        """,
+        )
+    return _html_page(
+        "Login",
+        f"""
       <section class="panel">
         <h1>Warhammer Stock Tracker</h1>
         <p>Sign in to open the tracker.</p>
@@ -749,20 +911,26 @@ def _login_page(next_url: str = "/", error: str | None = None) -> HTMLResponse:
           <button type="submit">Sign in</button>
         </form>
       </section>
-    """)
+    """,
+    )
 
 
 def _signup_page(next_url: str = "/", error: str | None = None) -> HTMLResponse:
     if not oidc_auth_enabled():
-        return _html_page("Sign Up", """
+        return _html_page(
+            "Sign Up",
+            """
           <section class="panel">
             <h1>Self-service signup is not enabled</h1>
             <p>Set <code>AUTH_PROVIDER=keycloak</code> and <code>WH40K_AUTH_ENABLED=true</code> to use provider signup.</p>
             <a class="button-link" href="/login">Back to sign in</a>
           </section>
-        """)
+        """,
+        )
     encoded_next = quote(_safe_next_url(next_url), safe="")
-    return _html_page("Sign Up", f"""
+    return _html_page(
+        "Sign Up",
+        f"""
       <section class="panel">
         <h1>Create account</h1>
         <p>Accounts are created by Keycloak. After signup, you will return to the tracker with your own private inventory.</p>
@@ -772,10 +940,13 @@ def _signup_page(next_url: str = "/", error: str | None = None) -> HTMLResponse:
           <a class="button-link secondary" href="/login?next={encoded_next}">Sign in instead</a>
         </div>
       </section>
-    """)
+    """,
+    )
 
 
-def _admin_page(user: dict[str, Any], message: str | None = None, error: str | None = None) -> HTMLResponse:
+def _admin_page(
+    user: dict[str, Any], message: str | None = None, error: str | None = None
+) -> HTMLResponse:
     with connect() as conn:
         users = conn.execute(
             """
@@ -797,15 +968,25 @@ def _admin_page(user: dict[str, Any], message: str | None = None, error: str | N
         for row in users
     )
     current_required = "" if int(user.get("must_change_password") or 0) else "required"
-    current_password_field = "" if int(user.get("must_change_password") or 0) else f"""
+    current_password_field = (
+        ""
+        if int(user.get("must_change_password") or 0)
+        else f"""
       <label>
         Current password
         <input name="current_password" type="password" autocomplete="current-password" {current_required}>
       </label>
     """
-    intro = "Set a permanent admin password before using the tracker." if int(user.get("must_change_password") or 0) else "Manage local users for this tracker."
+    )
+    intro = (
+        "Set a permanent admin password before using the tracker."
+        if int(user.get("must_change_password") or 0)
+        else "Manage local users for this tracker."
+    )
 
-    return _html_page("Admin", f"""
+    return _html_page(
+        "Admin",
+        f"""
       <section class="panel">
         <div class="button-row" style="justify-content: space-between;">
           <div>
@@ -819,6 +1000,8 @@ def _admin_page(user: dict[str, Any], message: str | None = None, error: str | N
         {_message_html(message, "ok")}
         {_message_html(error, "error")}
       </section>
+
+      {_bsdata_admin_panel()}
 
       <section class="panel">
         <h2>Set your password</h2>
@@ -864,12 +1047,21 @@ def _admin_page(user: dict[str, Any], message: str | None = None, error: str | N
           <tbody>{user_rows or '<tr><td colspan="4">No users yet.</td></tr>'}</tbody>
         </table>
       </section>
-    """)
+    """,
+    )
 
 
-def _provider_admin_page(user: dict[str, Any]) -> HTMLResponse:
-    admin_url = os.getenv("OIDC_ADMIN_URL", "http://localhost:8081/admin/master/console/#/wh40k").strip()
-    return _html_page("Admin", f"""
+def _provider_admin_page(
+    user: dict[str, Any],
+    message: str | None = None,
+    error: str | None = None,
+) -> HTMLResponse:
+    admin_url = os.getenv(
+        "OIDC_ADMIN_URL", "http://localhost:8081/admin/master/console/#/wh40k"
+    ).strip()
+    return _html_page(
+        "Admin",
+        f"""
       <section class="panel">
         <div class="button-row" style="justify-content: space-between;">
           <div>
@@ -880,7 +1072,10 @@ def _provider_admin_page(user: dict[str, Any]) -> HTMLResponse:
             <button class="secondary" type="submit">Sign out</button>
           </form>
         </div>
+        {_message_html(message, "ok")}
+        {_message_html(error, "error")}
       </section>
+      {_bsdata_admin_panel()}
       <section class="panel">
         <h2>Current user</h2>
         <p>{_escape(user.get("display_name") or user.get("username"))}</p>
@@ -889,7 +1084,8 @@ def _provider_admin_page(user: dict[str, Any]) -> HTMLResponse:
           <a class="button-link secondary" href="/">Open tracker</a>
         </div>
       </section>
-    """)
+    """,
+    )
 
 
 def _safe_next_url(next_url: str | None) -> str:
@@ -898,15 +1094,19 @@ def _safe_next_url(next_url: str | None) -> str:
     return next_url
 
 
-def _oidc_redirect(request: Request, next_url: str, endpoint: str = "auth") -> RedirectResponse:
+def _oidc_redirect(
+    request: Request, next_url: str, endpoint: str = "auth"
+) -> RedirectResponse:
     state = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)
     safe_next = _safe_next_url(next_url)
-    payload = _pack_oidc_state({
-        "state": state,
-        "next": safe_next,
-        "verifier": verifier,
-    })
+    payload = _pack_oidc_state(
+        {
+            "state": state,
+            "next": safe_next,
+            "verifier": verifier,
+        }
+    )
     params = {
         "client_id": OIDC_CLIENT_ID,
         "redirect_uri": _redirect_uri(request),
@@ -917,7 +1117,7 @@ def _oidc_redirect(request: Request, next_url: str, endpoint: str = "auth") -> R
         "code_challenge_method": "S256",
     }
     response = RedirectResponse(
-        url=f"{_oidc_url(f'/protocol/openid-connect/{endpoint}')}?{urlencode(params)}",
+        url=f"{_oidc_url(f'/protocol/openid-connect/{endpoint}')}%s{urlencode(params)}",
         status_code=303,
     )
     response.set_cookie(
@@ -936,7 +1136,7 @@ def _provider_logout_url() -> str:
         "client_id": OIDC_CLIENT_ID,
         "post_logout_redirect_uri": f"{APP_PUBLIC_URL}/login",
     }
-    return f"{_oidc_url('/protocol/openid-connect/logout')}?{urlencode(params)}"
+    return f"{_oidc_url('/protocol/openid-connect/logout')}%s{urlencode(params)}"
 
 
 def _issue_session_response(user_id: int, redirect_to: str) -> RedirectResponse:
@@ -947,12 +1147,12 @@ def _issue_session_response(user_id: int, redirect_to: str) -> RedirectResponse:
         conn.execute(
             """
             INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
             """,
             (_session_token_hash(token), user_id, now, expires_at),
         )
         conn.execute(
-            "UPDATE auth_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE auth_users SET last_login_at = %s, updated_at = %s WHERE id = %s",
             (now, now, user_id),
         )
 
@@ -968,11 +1168,16 @@ def _issue_session_response(user_id: int, redirect_to: str) -> RedirectResponse:
     return response
 
 
-def _clear_session_response(request: Request, redirect_to: str = "/login") -> RedirectResponse:
+def _clear_session_response(
+    request: Request, redirect_to: str = "/login"
+) -> RedirectResponse:
     token = request.cookies.get(AUTH_COOKIE_NAME)
     if token:
         with connect() as conn:
-            conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (_session_token_hash(token),))
+            conn.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = %s",
+                (_session_token_hash(token),),
+            )
     response = RedirectResponse(
         url=_provider_logout_url() if oidc_auth_enabled() else redirect_to,
         status_code=303,
@@ -1005,11 +1210,15 @@ def login_submit(
 
     cleaned_username = username.strip().lower()
     with connect() as conn:
-        user = conn.execute("SELECT * FROM auth_users WHERE username = ?", (cleaned_username,)).fetchone()
+        user = conn.execute(
+            "SELECT * FROM auth_users WHERE username = %s", (cleaned_username,)
+        ).fetchone()
     if user is None or not _verify_password(password, user["password_hash"]):
         return _login_page(_safe_next_url(next_url), "Invalid username or password.")
 
-    redirect_to = "/admin" if int(user["must_change_password"] or 0) else _safe_next_url(next_url)
+    redirect_to = (
+        "/admin" if int(user["must_change_password"] or 0) else _safe_next_url(next_url)
+    )
     return _issue_session_response(int(user["id"]), redirect_to)
 
 
@@ -1072,9 +1281,11 @@ def oidc_callback(
     if not id_token and not access_token:
         return _login_page("/", "The identity provider did not return a token.")
 
-    claims = _decode_oidc_token(id_token or access_token, verify_audience=bool(id_token))
+    claims = _oidc_user_claims(id_token, access_token)
     user = _upsert_oidc_user(claims)
-    response = _issue_session_response(int(user["id"]), _safe_next_url(stored.get("next")))
+    response = _issue_session_response(
+        int(user["id"]), _safe_next_url(stored.get("next"))
+    )
     response.delete_cookie(OIDC_STATE_COOKIE_NAME)
     return response
 
@@ -1092,12 +1303,15 @@ def logout_post(request: Request) -> RedirectResponse:
 @app.get("/admin", include_in_schema=False)
 def admin(request: Request) -> HTMLResponse:
     if not auth_enabled():
-        return _html_page("Admin", """
+        return _html_page(
+            "Admin",
+            """
           <section class="panel">
             <h1>Authentication is disabled</h1>
             <p>Set <code>WH40K_AUTH_ENABLED=true</code> before starting the app to use the admin portal.</p>
           </section>
-        """)
+        """,
+        )
     if oidc_auth_enabled():
         return _provider_admin_page(_require_admin(request))
     return _admin_page(_require_admin(request))
@@ -1117,7 +1331,9 @@ def admin_password(
         return _admin_page(user, error="New password and confirmation do not match.")
     if error := _password_error(new_password):
         return _admin_page(user, error=error)
-    if not int(user.get("must_change_password") or 0) and not _verify_password(current_password, user["password_hash"]):
+    if not int(user.get("must_change_password") or 0) and not _verify_password(
+        current_password, user["password_hash"]
+    ):
         return _admin_page(user, error="Current password is incorrect.")
 
     now = utc_now_sql()
@@ -1125,12 +1341,16 @@ def admin_password(
         conn.execute(
             """
             UPDATE auth_users
-            SET password_hash = ?, must_change_password = 0, updated_at = ?
-            WHERE id = ?
+            SET password_hash = %s, must_change_password = 0, updated_at = %s
+            WHERE id = %s
             """,
             (_password_hash(new_password), now, user["id"]),
         )
-        updated = dict(conn.execute("SELECT * FROM auth_users WHERE id = ?", (user["id"],)).fetchone())
+        updated = dict(
+            conn.execute(
+                "SELECT * FROM auth_users WHERE id = %s", (user["id"],)
+            ).fetchone()
+        )
     request.state.user = updated
     return _admin_page(updated, message="Password updated.")
 
@@ -1159,13 +1379,39 @@ def admin_create_user(
                 """
                 INSERT INTO auth_users (
                     username, password_hash, is_admin, must_change_password, created_at, updated_at
-                ) VALUES (?, ?, ?, 0, ?, ?)
+                ) VALUES (%s, %s, %s, 0, %s, %s)
                 """,
-                (cleaned_username, _password_hash(password), 1 if is_admin else 0, now, now),
+                (
+                    cleaned_username,
+                    _password_hash(password),
+                    1 if is_admin else 0,
+                    now,
+                    now,
+                ),
             )
     except Exception:
-        return _admin_page(user, error=f"Could not create user '{cleaned_username}'. The username may already exist.")
+        return _admin_page(
+            user,
+            error=f"Could not create user '{cleaned_username}'. The username may already exist.",
+        )
     return _admin_page(user, message=f"Created user '{cleaned_username}'.")
+
+
+@app.post("/admin/bsdata/sync", include_in_schema=False)
+def admin_sync_bsdata(request: Request) -> HTMLResponse:
+    user = _require_admin(request)
+    try:
+        result = _sync_all_game_systems()
+    except HTTPException as exc:
+        message = None
+        error = str(exc.detail)
+    else:
+        summary = _sync_summary_text(result)
+        message = None if result.get("failures") else summary
+        error = summary if result.get("failures") else None
+    if oidc_auth_enabled():
+        return _provider_admin_page(user, message=message, error=error)
+    return _admin_page(user, message=message, error=error)
 
 
 @app.get("/api/auth/me")
@@ -1192,7 +1438,9 @@ def auth_me(request: Request) -> dict[str, Any]:
 
 
 @app.put("/api/auth/preferences")
-def update_auth_preferences(payload: UserPreferencesPayload, request: Request) -> dict[str, Any]:
+def update_auth_preferences(
+    payload: UserPreferencesPayload, request: Request
+) -> dict[str, Any]:
     if not auth_enabled():
         raise HTTPException(status_code=400, detail="Authentication is not enabled.")
     user = _require_user(request)
@@ -1202,8 +1450,8 @@ def update_auth_preferences(payload: UserPreferencesPayload, request: Request) -
         conn.execute(
             """
             UPDATE auth_users
-            SET preferred_theme = ?, updated_at = ?
-            WHERE id = ?
+            SET preferred_theme = %s, updated_at = %s
+            WHERE id = %s
             """,
             (theme, now, user["id"]),
         )
@@ -1217,13 +1465,15 @@ def _inventory_owner_id(request: Request) -> int | None:
     return int(_require_user(request)["id"])
 
 
-def _inventory_owner_clause(owner_user_id: int | None, alias: str = "i") -> tuple[str, list[Any]]:
+def _inventory_owner_clause(
+    owner_user_id: int | None, alias: str = "i"
+) -> tuple[str, list[Any]]:
     column = f"{alias}.owner_user_id" if alias else "owner_user_id"
     deleted_column = f"{alias}.deleted_at" if alias else "deleted_at"
     visibility_clause = f"{deleted_column} IS NULL"
     if owner_user_id is None:
         return f"{column} IS NULL AND {visibility_clause}", []
-    return f"{column} = ? AND {visibility_clause}", [owner_user_id]
+    return f"{column} = %s AND {visibility_clause}", [owner_user_id]
 
 
 def _config_or_400(game_system: str | None) -> GameSystemConfig:
@@ -1260,12 +1510,14 @@ def _wargear_options_from_payload(decoded: Any) -> list[dict[str, Any]]:
         if not key or not name:
             continue
         stats = option.get("stats") if isinstance(option.get("stats"), dict) else {}
-        options.append({
-            "key": key,
-            "name": name,
-            "kind": _clean_optional(str(option.get("kind") or "")) or "Weapon",
-            "stats": {str(k): str(v) for k, v in stats.items() if v is not None},
-        })
+        options.append(
+            {
+                "key": key,
+                "name": name,
+                "kind": _clean_optional(str(option.get("kind") or "")) or "Weapon",
+                "stats": {str(k): str(v) for k, v in stats.items() if v is not None},
+            }
+        )
     return options
 
 
@@ -1299,20 +1551,23 @@ def _decode_model_composition(raw: str | None) -> list[dict[str, Any]]:
         composition_options = component.get("composition_options")
         if not isinstance(composition_options, list):
             composition_options = []
-        components.append({
-            "key": key,
-            "name": name,
-            "min_models": _safe_optional_int(component.get("min_models")),
-            "max_models": _safe_optional_int(component.get("max_models")),
-            "wargear_options": options,
-            "wargear_option_count": len(options),
-            "composition_options": [
-                _clean_optional(str(option or ""))
-                for option in composition_options
-                if _clean_optional(str(option or ""))
-            ],
-            "display_in_composition": component.get("display_in_composition") is not False,
-        })
+        components.append(
+            {
+                "key": key,
+                "name": name,
+                "min_models": _safe_optional_int(component.get("min_models")),
+                "max_models": _safe_optional_int(component.get("max_models")),
+                "wargear_options": options,
+                "wargear_option_count": len(options),
+                "composition_options": [
+                    _clean_optional(str(option or ""))
+                    for option in composition_options
+                    if _clean_optional(str(option or ""))
+                ],
+                "display_in_composition": component.get("display_in_composition")
+                is not False,
+            }
+        )
     return components
 
 
@@ -1343,7 +1598,9 @@ def _decode_wargear_selections(raw: str | None) -> dict[str, int]:
     return _clean_wargear_selections(decoded)
 
 
-def _copy_wargear_selection_key(component: dict[str, Any], option: dict[str, Any]) -> str:
+def _copy_wargear_selection_key(
+    component: dict[str, Any], option: dict[str, Any]
+) -> str:
     return f"{component['key']}::{option['key']}"
 
 
@@ -1358,7 +1615,11 @@ def _wargear_summary_labels(
         component_name = component.get("name") or ""
         for option in component.get("wargear_options", []):
             key = _copy_wargear_selection_key(component, option)
-            labels[key] = f"{component_name}: {option['name']}" if component_name else option["name"]
+            labels[key] = (
+                f"{component_name}: {option['name']}"
+                if component_name
+                else option["name"]
+            )
             order.setdefault(key, len(order))
 
     for option in options:
@@ -1377,7 +1638,10 @@ def _format_wargear_summary(
         return None
     labels, order = _wargear_summary_labels(options, model_composition)
     parts: list[str] = []
-    for key in sorted(selections, key=lambda item: (order.get(item, len(order)), labels.get(item, item).lower())):
+    for key in sorted(
+        selections,
+        key=lambda item: (order.get(item, len(order)), labels.get(item, item).lower()),
+    ):
         amount = selections[key]
         name = labels.get(key) or key
         parts.append(f"{amount}x {name}")
@@ -1396,7 +1660,9 @@ def _decode_stats(row: dict[str, Any]) -> dict[str, Any]:
 
     options = _decode_wargear_options(row.pop("wargear_options_json", None))
     row["wargear_option_count"] = len(options)
-    row["model_composition"] = _decode_model_composition(row.pop("model_composition_json", None))
+    row["model_composition"] = _decode_model_composition(
+        row.pop("model_composition_json", None)
+    )
     return row
 
 
@@ -1427,7 +1693,9 @@ def _wargear_text(value: str | None) -> str:
             if quantity > 0:
                 parts.append(f"{quantity} x {name}")
 
-    notes = _clean_textarea(parsed.get("notes") if isinstance(parsed.get("notes"), str) else None)
+    notes = _clean_textarea(
+        parsed.get("notes") if isinstance(parsed.get("notes"), str) else None
+    )
     if notes:
         parts.append(notes)
 
@@ -1444,18 +1712,24 @@ def _image_dict(row: Any) -> dict[str, Any]:
     return item
 
 
-def _image_storage_key(inventory_item_id: int, file_name: str, storage_key: str | None = None) -> str:
+def _image_storage_key(
+    inventory_item_id: int, file_name: str, storage_key: str | None = None
+) -> str:
     if storage_key:
         return storage_key
     return f"inventory/{inventory_item_id}/{Path(file_name).name}"
 
 
-def _delete_image_file(inventory_item_id: int, file_name: str, storage_key: str | None = None) -> None:
+def _delete_image_file(
+    inventory_item_id: int, file_name: str, storage_key: str | None = None
+) -> None:
     delete_object(_image_storage_key(inventory_item_id, file_name, storage_key))
 
 
 @app.get("/uploads/inventory/{item_id}/{file_name}", include_in_schema=False)
-def uploaded_inventory_image(request: Request, item_id: int, file_name: str) -> Response:
+def uploaded_inventory_image(
+    request: Request, item_id: int, file_name: str
+) -> Response:
     safe_name = Path(file_name).name
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
@@ -1465,8 +1739,8 @@ def uploaded_inventory_image(request: Request, item_id: int, file_name: str) -> 
             SELECT img.file_name, img.storage_key, img.content_type
             FROM inventory_images img
             JOIN inventory_items i ON i.id = img.inventory_item_id
-            WHERE img.inventory_item_id = ?
-              AND img.file_name = ?
+            WHERE img.inventory_item_id = %s
+              AND img.file_name = %s
               AND img.deleted_at IS NULL
               AND {owner_clause}
             """,
@@ -1476,12 +1750,16 @@ def uploaded_inventory_image(request: Request, item_id: int, file_name: str) -> 
         raise HTTPException(status_code=404, detail="Image not found.")
 
     try:
-        stored = get_object(_image_storage_key(item_id, safe_name, row.get("storage_key")))
+        stored = get_object(
+            _image_storage_key(item_id, safe_name, row.get("storage_key"))
+        )
     except ObjectNotFound:
         raise HTTPException(status_code=404, detail="Image not found.")
     return Response(
         content=stored.content,
-        media_type=row.get("content_type") or stored.content_type or "application/octet-stream",
+        media_type=row.get("content_type")
+        or stored.content_type
+        or "application/octet-stream",
     )
 
 
@@ -1498,11 +1776,19 @@ def _copy_payload_data(
     data["storage_location"] = _clean_optional(data.get("storage_location"))
     data["wargear"] = _clean_textarea(data.get("wargear"))
     data["notes"] = _clean_textarea(data.get("notes"))
-    data["wargear_selections"] = _clean_wargear_selections(data.get("wargear_selections"))
-    data["wargear_selections_json"] = json.dumps(data["wargear_selections"], sort_keys=True) if data["wargear_selections"] else None
+    data["wargear_selections"] = _clean_wargear_selections(
+        data.get("wargear_selections")
+    )
+    data["wargear_selections_json"] = (
+        json.dumps(data["wargear_selections"], sort_keys=True)
+        if data["wargear_selections"]
+        else None
+    )
 
     if data["wargear_selections"]:
-        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options, model_composition)
+        data["wargear"] = _format_wargear_summary(
+            data["wargear_selections"], wargear_options, model_composition
+        )
 
     return data
 
@@ -1512,7 +1798,9 @@ def _inventory_copy_dict(row: Any) -> dict[str, Any]:
     copy["models_owned"] = max(int(copy.get("models_owned") or 0), 0)
     copy["built_count"] = max(int(copy.get("built_count") or 0), 0)
     copy["painted_count"] = max(int(copy.get("painted_count") or 0), 0)
-    copy["wargear_selections"] = _decode_wargear_selections(copy.pop("wargear_selections_json", None))
+    copy["wargear_selections"] = _decode_wargear_selections(
+        copy.pop("wargear_selections_json", None)
+    )
     copy.setdefault("images", [])
     return copy
 
@@ -1564,7 +1852,9 @@ def _copy_seed_from_item(item: Any, copy_number: int) -> dict[str, Any]:
     }
 
 
-def _sync_inventory_progress_from_copies(conn: Any, item_id: int, updated_at: str | None = None) -> None:
+def _sync_inventory_progress_from_copies(
+    conn: Any, item_id: int, updated_at: str | None = None
+) -> None:
     row = conn.execute(
         """
         SELECT
@@ -1572,7 +1862,7 @@ def _sync_inventory_progress_from_copies(conn: Any, item_id: int, updated_at: st
             COALESCE(SUM(c.painted_count), 0) AS painted_count
         FROM inventory_copies c
         JOIN inventory_items i ON i.id = c.inventory_item_id
-        WHERE c.inventory_item_id = ?
+        WHERE c.inventory_item_id = %s
           AND c.copy_number <= i.quantity
           AND c.deleted_at IS NULL
         """,
@@ -1585,8 +1875,8 @@ def _sync_inventory_progress_from_copies(conn: Any, item_id: int, updated_at: st
         conn.execute(
             """
             UPDATE inventory_items
-            SET built_count = ?, painted_count = ?
-            WHERE id = ?
+            SET built_count = %s, painted_count = %s
+            WHERE id = %s
             """,
             (built_count, painted_count, item_id),
         )
@@ -1595,11 +1885,11 @@ def _sync_inventory_progress_from_copies(conn: Any, item_id: int, updated_at: st
     conn.execute(
         """
         UPDATE inventory_items
-        SET built_count = ?,
-            painted_count = ?,
-            updated_at = ?,
+        SET built_count = %s,
+            painted_count = %s,
+            updated_at = %s,
             version = COALESCE(version, 1) + 1
-        WHERE id = ?
+        WHERE id = %s
         """,
         (built_count, painted_count, updated_at, item_id),
     )
@@ -1612,22 +1902,30 @@ def _ensure_inventory_copies(conn: Any, item: Any) -> None:
         """
         SELECT copy_number, models_owned, built_count, painted_count
         FROM inventory_copies
-        WHERE inventory_item_id = ?
+        WHERE inventory_item_id = %s
           AND deleted_at IS NULL
         """,
         (item_id,),
     ).fetchall()
     existing_numbers = {int(row["copy_number"]) for row in existing_rows}
     built_assigned = sum(max(int(row["built_count"] or 0), 0) for row in existing_rows)
-    painted_assigned = sum(max(int(row["painted_count"] or 0), 0) for row in existing_rows)
+    painted_assigned = sum(
+        max(int(row["painted_count"] or 0), 0) for row in existing_rows
+    )
     now = utc_now_sql()
 
     for copy_number in range(1, quantity + 1):
         if copy_number in existing_numbers:
             continue
-        seed = _copy_seed_from_item(item, copy_number if existing_numbers else copy_number)
-        seed["built_count"] = _copy_progress_seed(item["built_count"], built_assigned, seed["models_owned"])
-        seed["painted_count"] = _copy_progress_seed(item["painted_count"], painted_assigned, seed["models_owned"])
+        seed = _copy_seed_from_item(
+            item, copy_number if existing_numbers else copy_number
+        )
+        seed["built_count"] = _copy_progress_seed(
+            item["built_count"], built_assigned, seed["models_owned"]
+        )
+        seed["painted_count"] = _copy_progress_seed(
+            item["painted_count"], painted_assigned, seed["models_owned"]
+        )
         built_assigned += seed["built_count"]
         painted_assigned += seed["painted_count"]
         conn.execute(
@@ -1636,7 +1934,7 @@ def _ensure_inventory_copies(conn: Any, item: Any) -> None:
                 public_id, inventory_item_id, copy_number, models_owned, built_count, painted_count, model_number,
                 wargear, wargear_selections_json, storage_location, notes,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 _new_public_id(),
@@ -1661,7 +1959,7 @@ def _ensure_inventory_copies(conn: Any, item: Any) -> None:
         first_copy = conn.execute(
             """
             SELECT id FROM inventory_copies
-            WHERE inventory_item_id = ? AND copy_number = 1
+            WHERE inventory_item_id = %s AND copy_number = 1
               AND deleted_at IS NULL
             """,
             (item_id,),
@@ -1670,8 +1968,8 @@ def _ensure_inventory_copies(conn: Any, item: Any) -> None:
             conn.execute(
                 """
                 UPDATE inventory_images
-                SET inventory_copy_id = ?
-                WHERE inventory_item_id = ? AND inventory_copy_id IS NULL
+                SET inventory_copy_id = %s
+                WHERE inventory_item_id = %s AND inventory_copy_id IS NULL
                 """,
                 (first_copy["id"], item_id),
             )
@@ -1694,7 +1992,7 @@ def _apply_imported_item_to_copies(
         SELECT c.id, c.copy_number, c.models_owned
         FROM inventory_copies c
         JOIN inventory_items i ON i.id = c.inventory_item_id
-        WHERE c.inventory_item_id = ?
+        WHERE c.inventory_item_id = %s
           AND c.copy_number <= i.quantity
           AND c.deleted_at IS NULL
         ORDER BY c.copy_number
@@ -1712,16 +2010,16 @@ def _apply_imported_item_to_copies(
             conn.execute(
                 """
                 UPDATE inventory_copies
-                SET built_count = ?,
-                    painted_count = ?,
-                    model_number = ?,
-                    wargear = ?,
-                    wargear_selections_json = ?,
-                    storage_location = ?,
-                    notes = ?,
-                    updated_at = ?,
+                SET built_count = %s,
+                    painted_count = %s,
+                    model_number = %s,
+                    wargear = %s,
+                    wargear_selections_json = %s,
+                    storage_location = %s,
+                    notes = %s,
+                    updated_at = %s,
                     version = COALESCE(version, 1) + 1
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (
                     built_values[index],
@@ -1739,11 +2037,11 @@ def _apply_imported_item_to_copies(
             conn.execute(
                 """
                 UPDATE inventory_copies
-                SET built_count = ?,
-                    painted_count = ?,
-                    updated_at = ?,
+                SET built_count = %s,
+                    painted_count = %s,
+                    updated_at = %s,
                     version = COALESCE(version, 1) + 1
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (built_values[index], painted_values[index], now, copy["id"]),
             )
@@ -1760,11 +2058,21 @@ def _trim_inventory_copies(conn: Any, item_id: int, quantity: int) -> list[Any]:
 def _inventory_dict(row: Any) -> dict[str, Any]:
     item = dict(row)
     item.pop("owner_user_id", None)
-    item["unbuilt_count"] = max(int(item.get("models_owned") or 0) - int(item.get("built_count") or 0), 0)
-    item["unpainted_count"] = max(int(item.get("models_owned") or 0) - int(item.get("painted_count") or 0), 0)
-    item["wargear_selections"] = _decode_wargear_selections(item.pop("wargear_selections_json", None))
-    item["wargear_options"] = _decode_wargear_options(item.pop("current_wargear_options_json", None))
-    item["model_composition"] = _decode_model_composition(item.pop("current_model_composition_json", None))
+    item["unbuilt_count"] = max(
+        int(item.get("models_owned") or 0) - int(item.get("built_count") or 0), 0
+    )
+    item["unpainted_count"] = max(
+        int(item.get("models_owned") or 0) - int(item.get("painted_count") or 0), 0
+    )
+    item["wargear_selections"] = _decode_wargear_selections(
+        item.pop("wargear_selections_json", None)
+    )
+    item["wargear_options"] = _decode_wargear_options(
+        item.pop("current_wargear_options_json", None)
+    )
+    item["model_composition"] = _decode_model_composition(
+        item.pop("current_model_composition_json", None)
+    )
     item.setdefault("images", [])
     return item
 
@@ -1776,7 +2084,7 @@ def _attach_copies(conn: Any, items: list[dict[str, Any]]) -> None:
         return
 
     ids = [int(item["id"]) for item in items]
-    placeholders = ",".join("?" for _ in ids)
+    placeholders = ",".join("%s" for _ in ids)
     rows = conn.execute(
         f"""
         SELECT c.*
@@ -1803,11 +2111,15 @@ def _apply_copy_progress_totals(items: list[dict[str, Any]]) -> None:
         if not copies:
             continue
         built_count = sum(max(int(copy.get("built_count") or 0), 0) for copy in copies)
-        painted_count = sum(max(int(copy.get("painted_count") or 0), 0) for copy in copies)
+        painted_count = sum(
+            max(int(copy.get("painted_count") or 0), 0) for copy in copies
+        )
         item["built_count"] = built_count
         item["painted_count"] = painted_count
         item["unbuilt_count"] = max(int(item.get("models_owned") or 0) - built_count, 0)
-        item["unpainted_count"] = max(int(item.get("models_owned") or 0) - painted_count, 0)
+        item["unpainted_count"] = max(
+            int(item.get("models_owned") or 0) - painted_count, 0
+        )
 
 
 def _attach_images(conn: Any, items: list[dict[str, Any]]) -> None:
@@ -1819,7 +2131,7 @@ def _attach_images(conn: Any, items: list[dict[str, Any]]) -> None:
         return
 
     ids = [int(item["id"]) for item in items]
-    placeholders = ",".join("?" for _ in ids)
+    placeholders = ",".join("%s" for _ in ids)
     rows = conn.execute(
         f"""
         SELECT * FROM inventory_images
@@ -1831,9 +2143,7 @@ def _attach_images(conn: Any, items: list[dict[str, Any]]) -> None:
     ).fetchall()
     by_item = {int(item["id"]): item for item in items}
     by_copy = {
-        int(copy["id"]): copy
-        for item in items
-        for copy in item.get("copies", [])
+        int(copy["id"]): copy for item in items for copy in item.get("copies", [])
     }
     for row in rows:
         image = _image_dict(row)
@@ -1871,8 +2181,14 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
     data["acquired_on"] = _clean_optional(data.get("acquired_on"))
     data["model_number"] = _clean_optional(data.get("model_number"))
     data["wargear"] = _clean_textarea(data.get("wargear"))
-    data["wargear_selections"] = _clean_wargear_selections(data.get("wargear_selections"))
-    data["wargear_selections_json"] = json.dumps(data["wargear_selections"], sort_keys=True) if data["wargear_selections"] else None
+    data["wargear_selections"] = _clean_wargear_selections(
+        data.get("wargear_selections")
+    )
+    data["wargear_selections_json"] = (
+        json.dumps(data["wargear_selections"], sort_keys=True)
+        if data["wargear_selections"]
+        else None
+    )
     data["notes"] = _clean_textarea(data.get("notes"))
 
     wargear_options: list[dict[str, Any]] = []
@@ -1883,12 +2199,15 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
             SELECT id, game_system, name, faction, catalogue_file,
                    wargear_options_json, model_composition_json
             FROM bsd_units
-            WHERE id = ? AND deleted_at IS NULL
+            WHERE id = %s AND deleted_at IS NULL
             """,
             (data["unit_id"],),
         ).fetchone()
         if unit is None:
-            raise HTTPException(status_code=404, detail="Catalogue entry not found. Sync BSData, then search again.")
+            raise HTTPException(
+                status_code=404,
+                detail="Catalogue entry not found. Wait for BSData sync to finish, then search again.",
+            )
         data["game_system"] = unit["game_system"]
         data["unit_name"] = unit["name"]
         data["faction"] = data["faction"] or unit["faction"]
@@ -1897,15 +2216,21 @@ def _payload_with_unit_snapshot(payload: InventoryPayload, conn: Any) -> dict[st
         model_composition = _decode_model_composition(unit["model_composition_json"])
 
     if data["wargear_selections"]:
-        data["wargear"] = _format_wargear_summary(data["wargear_selections"], wargear_options, model_composition)
+        data["wargear"] = _format_wargear_summary(
+            data["wargear_selections"], wargear_options, model_composition
+        )
 
     if not data.get("unit_name"):
-        raise HTTPException(status_code=400, detail="unit_name is required for custom inventory items.")
+        raise HTTPException(
+            status_code=400, detail="unit_name is required for custom inventory items."
+        )
 
     return data
 
 
-def _inventory_item_response(conn: Any, item_id: int, owner_user_id: int | None) -> dict[str, Any]:
+def _inventory_item_response(
+    conn: Any, item_id: int, owner_user_id: int | None
+) -> dict[str, Any]:
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     row = conn.execute(
         f"""
@@ -1921,7 +2246,7 @@ def _inventory_item_response(conn: Any, item_id: int, owner_user_id: int | None)
             u.active AS unit_active
         FROM inventory_items i
         LEFT JOIN bsd_units u ON u.id = i.unit_id
-        WHERE i.id = ? AND {owner_clause}
+        WHERE i.id = %s AND {owner_clause}
         """,
         [item_id, *owner_params],
     ).fetchone()
@@ -1952,7 +2277,7 @@ def _item_wargear_catalogue(
         SELECT u.wargear_options_json, u.model_composition_json
         FROM inventory_items i
         LEFT JOIN bsd_units u ON u.id = i.unit_id
-        WHERE i.id = ? AND {owner_clause}
+        WHERE i.id = %s AND {owner_clause}
         """,
         [item_id, *owner_params],
     ).fetchone()
@@ -1979,7 +2304,9 @@ def _safe_image_ext(upload: UploadFile) -> str:
     if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         return ".jpg" if suffix == ".jpeg" else suffix
 
-    raise HTTPException(status_code=400, detail="Upload must be a JPG, PNG, WebP, or GIF image.")
+    raise HTTPException(
+        status_code=400, detail="Upload must be a JPG, PNG, WebP, or GIF image."
+    )
 
 
 def _original_name(filename: str | None) -> str | None:
@@ -2004,26 +2331,28 @@ def game_systems() -> list[dict[str, Any]]:
 
 
 @app.get("/api/status")
-def status(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> dict[str, Any]:
+def status(
+    request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)
+) -> dict[str, Any]:
     config = _config_or_400(game_system)
     bsdata_dir = _bsdata_dir(config)
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
         last_run = conn.execute(
-            "SELECT * FROM import_runs WHERE game_system = ? ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM import_runs WHERE game_system = %s ORDER BY id DESC LIMIT 1",
             (config.id,),
         ).fetchone()
         active_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM bsd_units WHERE game_system = ? AND active = 1 AND deleted_at IS NULL",
+            "SELECT COUNT(*) AS count FROM bsd_units WHERE game_system = %s AND active = 1 AND deleted_at IS NULL",
             (config.id,),
         ).fetchone()["count"]
         unit_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM bsd_units WHERE game_system = ?",
+            "SELECT COUNT(*) AS count FROM bsd_units WHERE game_system = %s",
             (config.id,),
         ).fetchone()["count"]
         inventory_count = conn.execute(
-            f"SELECT COUNT(*) AS count FROM inventory_items i WHERE i.game_system = ? AND {owner_clause}",
+            f"SELECT COUNT(*) AS count FROM inventory_items i WHERE i.game_system = %s AND {owner_clause}",
             [config.id, *owner_params],
         ).fetchone()["count"]
         image_count = conn.execute(
@@ -2031,7 +2360,7 @@ def status(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTE
             SELECT COUNT(*) AS count
             FROM inventory_images img
             JOIN inventory_items i ON i.id = img.inventory_item_id
-            WHERE i.game_system = ? AND img.deleted_at IS NULL AND {owner_clause}
+            WHERE i.game_system = %s AND img.deleted_at IS NULL AND {owner_clause}
             """,
             [config.id, *owner_params],
         ).fetchone()["count"]
@@ -2052,7 +2381,16 @@ def status(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTE
         }
 
 
-def _sync_game_system(config: GameSystemConfig) -> dict[str, Any]:
+def _run_with_bsdata_sync_lock(callback):
+    if not _BSDATA_SYNC_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A BSData sync is already running.")
+    try:
+        return callback()
+    finally:
+        _BSDATA_SYNC_LOCK.release()
+
+
+def _sync_game_system_unlocked(config: GameSystemConfig) -> dict[str, Any]:
     started_at = utc_now_sql()
     repo_message = ""
     bsdata_dir = _bsdata_dir(config)
@@ -2068,7 +2406,7 @@ def _sync_game_system(config: GameSystemConfig) -> dict[str, Any]:
                 INSERT INTO import_runs (
                     game_system, started_at, finished_at, status, message, repo_message,
                     files_scanned, units_imported, errors_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     config.id,
@@ -2100,32 +2438,81 @@ def _sync_game_system(config: GameSystemConfig) -> dict[str, Any]:
                 INSERT INTO import_runs (
                     game_system, started_at, finished_at, status, message, repo_message,
                     files_scanned, units_imported, errors_json
-                ) VALUES (?, ?, ?, 'failed', ?, ?, 0, 0, ?)
+                ) VALUES (%s, %s, %s, 'failed', %s, %s, 0, 0, %s)
                 """,
-                (config.id, started_at, finished_at, str(exc), repo_message, json.dumps([str(exc)])),
+                (
+                    config.id,
+                    started_at,
+                    finished_at,
+                    str(exc),
+                    repo_message,
+                    json.dumps([str(exc)]),
+                ),
             )
-        raise HTTPException(status_code=500, detail=f"{config.label} BSData sync failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"{config.label} BSData sync failed: {exc}"
+        ) from exc
+
+
+def _sync_game_system(config: GameSystemConfig) -> dict[str, Any]:
+    return _run_with_bsdata_sync_lock(lambda: _sync_game_system_unlocked(config))
+
+
+def _sync_all_game_systems() -> dict[str, Any]:
+    def run() -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for config in GAME_SYSTEMS.values():
+            try:
+                results.append(_sync_game_system_unlocked(config))
+            except HTTPException as exc:
+                failures.append(
+                    {
+                        "game_system": config.id,
+                        "game_label": config.label,
+                        "status_code": exc.status_code,
+                        "detail": exc.detail,
+                    }
+                )
+        status_text = "success"
+        if failures:
+            status_text = "failed" if not results else "success_with_errors"
+        return {
+            "status": status_text,
+            "results": results,
+            "failures": failures,
+        }
+
+    return _run_with_bsdata_sync_lock(run)
 
 
 @app.post("/api/sync")
-def sync_bsdata(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> dict[str, Any]:
+def sync_bsdata(
+    request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)
+) -> dict[str, Any]:
+    if auth_enabled():
+        _require_admin(request)
     return _sync_game_system(_config_or_400(game_system))
 
 
 @app.post("/api/sync/{game_system}")
-def sync_bsdata_for_system(game_system: str) -> dict[str, Any]:
+def sync_bsdata_for_system(request: Request, game_system: str) -> dict[str, Any]:
+    if auth_enabled():
+        _require_admin(request)
     return _sync_game_system(_config_or_400(game_system))
 
 
 @app.get("/api/factions")
-def factions(game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dict[str, Any]]:
+def factions(
+    game_system: str = Query(default=DEFAULT_GAME_SYSTEM),
+) -> list[dict[str, Any]]:
     config = _config_or_400(game_system)
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT faction, COUNT(*) AS unit_count
             FROM bsd_units
-            WHERE game_system = ? AND active = 1
+            WHERE game_system = %s AND active = 1
             GROUP BY faction
             ORDER BY lower(faction)
             """,
@@ -2148,7 +2535,7 @@ def units(
                min_models, max_models, keywords, stats_json, wargear_options_json,
                model_composition_json, imported_at, version, deleted_at
         FROM bsd_units
-        WHERE game_system = ? AND active = 1 AND deleted_at IS NULL
+        WHERE game_system = %s AND active = 1 AND deleted_at IS NULL
         """
     ]
     params: list[Any] = [config.id]
@@ -2167,17 +2554,23 @@ def units(
             conditions: list[str] = []
             for variant in sorted(variants):
                 like = f"%{variant}%"
-                for column in ("name", "faction", "keywords", "entry_type", "catalogue_file"):
-                    conditions.append(f"{column} LIKE ?")
+                for column in (
+                    "name",
+                    "faction",
+                    "keywords",
+                    "entry_type",
+                    "catalogue_file",
+                ):
+                    conditions.append(f"{column} ILIKE %s")
                     params.append(like)
             sql.append("AND (" + " OR ".join(conditions) + ")")
 
     cleaned_faction = _clean_optional(faction)
     if cleaned_faction:
-        sql.append("AND faction = ?")
+        sql.append("AND faction = %s")
         params.append(cleaned_faction)
 
-    sql.append("ORDER BY lower(faction), lower(name) LIMIT ?")
+    sql.append("ORDER BY lower(faction), lower(name) LIMIT %s")
     params.append(limit)
 
     with connect() as conn:
@@ -2186,7 +2579,9 @@ def units(
 
 
 @app.get("/api/inventory")
-def inventory(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> list[dict[str, Any]]:
+def inventory(
+    request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)
+) -> list[dict[str, Any]]:
     config = _config_or_400(game_system)
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
@@ -2205,7 +2600,7 @@ def inventory(request: Request, game_system: str = Query(default=DEFAULT_GAME_SY
                 u.active AS unit_active
             FROM inventory_items i
             LEFT JOIN bsd_units u ON u.id = i.unit_id
-            WHERE i.game_system = ? AND {owner_clause}
+            WHERE i.game_system = %s AND {owner_clause}
             ORDER BY lower(COALESCE(i.faction, '')), lower(i.unit_name), i.id
             """,
             [config.id, *owner_params],
@@ -2227,7 +2622,9 @@ def inventory(request: Request, game_system: str = Query(default=DEFAULT_GAME_SY
 
 
 @app.post("/api/inventory", status_code=201)
-def create_inventory_item(request: Request, payload: InventoryPayload) -> dict[str, Any]:
+def create_inventory_item(
+    request: Request, payload: InventoryPayload
+) -> dict[str, Any]:
     now = utc_now_sql()
     owner_user_id = _inventory_owner_id(request)
     with connect() as conn:
@@ -2238,7 +2635,7 @@ def create_inventory_item(request: Request, payload: InventoryPayload) -> dict[s
                 public_id, owner_user_id, game_system, unit_id, unit_name, faction, catalogue_file, quantity, models_owned,
                 built_count, painted_count, wargear, wargear_selections_json, model_number, storage_location, notes, acquired_on,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -2264,21 +2661,27 @@ def create_inventory_item(request: Request, payload: InventoryPayload) -> dict[s
             ),
         )
         item_id = int(cursor.fetchone()["id"])
-        row = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM inventory_items WHERE id = %s", (item_id,)
+        ).fetchone()
         _ensure_inventory_copies(conn, row)
         return _inventory_item_response(conn, item_id, owner_user_id)
 
 
 @app.put("/api/inventory/{item_id}")
-def update_inventory_item(request: Request, item_id: int, payload: InventoryPayload) -> dict[str, Any]:
+def update_inventory_item(
+    request: Request, item_id: int, payload: InventoryPayload
+) -> dict[str, Any]:
     now = utc_now_sql()
     image_rows_to_delete: list[Any] = []
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
-    owner_update_clause, owner_update_params = _inventory_owner_clause(owner_user_id, alias="")
+    owner_update_clause, owner_update_params = _inventory_owner_clause(
+        owner_user_id, alias=""
+    )
     with connect() as conn:
         existing = conn.execute(
-            f"SELECT id FROM inventory_items i WHERE i.id = ? AND {owner_clause}",
+            f"SELECT id FROM inventory_items i WHERE i.id = %s AND {owner_clause}",
             [item_id, *owner_params],
         ).fetchone()
         if existing is None:
@@ -2288,24 +2691,24 @@ def update_inventory_item(request: Request, item_id: int, payload: InventoryPayl
         conn.execute(
             f"""
             UPDATE inventory_items SET
-                game_system = ?,
-                unit_id = ?,
-                unit_name = ?,
-                faction = ?,
-                catalogue_file = ?,
-                quantity = ?,
-                models_owned = ?,
-                built_count = ?,
-                painted_count = ?,
-                wargear = ?,
-                wargear_selections_json = ?,
-                model_number = ?,
-                storage_location = ?,
-                notes = ?,
-                acquired_on = ?,
-                updated_at = ?,
+                game_system = %s,
+                unit_id = %s,
+                unit_name = %s,
+                faction = %s,
+                catalogue_file = %s,
+                quantity = %s,
+                models_owned = %s,
+                built_count = %s,
+                painted_count = %s,
+                wargear = %s,
+                wargear_selections_json = %s,
+                model_number = %s,
+                storage_location = %s,
+                notes = %s,
+                acquired_on = %s,
+                updated_at = %s,
                 version = COALESCE(version, 1) + 1
-            WHERE id = ? AND {owner_update_clause}
+            WHERE id = %s AND {owner_update_clause}
             """,
             [
                 data["game_system"],
@@ -2330,19 +2733,23 @@ def update_inventory_item(request: Request, item_id: int, payload: InventoryPayl
         )
         image_rows_to_delete = _trim_inventory_copies(conn, item_id, data["quantity"])
         row = conn.execute(
-            f"SELECT * FROM inventory_items i WHERE i.id = ? AND {owner_clause}",
+            f"SELECT * FROM inventory_items i WHERE i.id = %s AND {owner_clause}",
             [item_id, *owner_params],
         ).fetchone()
         _ensure_inventory_copies(conn, row)
         item = _inventory_item_response(conn, item_id, owner_user_id)
 
     for row in image_rows_to_delete:
-        _delete_image_file(int(row["inventory_item_id"]), row["file_name"], row.get("storage_key"))
+        _delete_image_file(
+            int(row["inventory_item_id"]), row["file_name"], row.get("storage_key")
+        )
     return item
 
 
 @app.put("/api/inventory/{item_id}/copies/{copy_id}")
-def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload: InventoryCopyPayload) -> dict[str, Any]:
+def update_inventory_copy(
+    request: Request, item_id: int, copy_id: int, payload: InventoryCopyPayload
+) -> dict[str, Any]:
     now = utc_now_sql()
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
@@ -2352,8 +2759,8 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
             SELECT c.*
             FROM inventory_copies c
             JOIN inventory_items i ON i.id = c.inventory_item_id
-            WHERE c.id = ?
-              AND c.inventory_item_id = ?
+            WHERE c.id = %s
+              AND c.inventory_item_id = %s
               AND c.deleted_at IS NULL
               AND {owner_clause}
             """,
@@ -2362,22 +2769,24 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
         if copy_row is None:
             raise HTTPException(status_code=404, detail="Inventory copy not found.")
 
-        wargear_options, model_composition = _item_wargear_catalogue(conn, item_id, owner_user_id)
+        wargear_options, model_composition = _item_wargear_catalogue(
+            conn, item_id, owner_user_id
+        )
         data = _copy_payload_data(payload, wargear_options, model_composition)
         conn.execute(
             f"""
             UPDATE inventory_copies SET
-                models_owned = COALESCE(?, models_owned),
-                built_count = COALESCE(?, built_count),
-                painted_count = COALESCE(?, painted_count),
-                model_number = ?,
-                wargear = ?,
-                wargear_selections_json = ?,
-                storage_location = ?,
-                notes = ?,
-                updated_at = ?,
+                models_owned = COALESCE(%s, models_owned),
+                built_count = COALESCE(%s, built_count),
+                painted_count = COALESCE(%s, painted_count),
+                model_number = %s,
+                wargear = %s,
+                wargear_selections_json = %s,
+                storage_location = %s,
+                notes = %s,
+                updated_at = %s,
                 version = COALESCE(version, 1) + 1
-            WHERE id = ? AND inventory_item_id = ?
+            WHERE id = %s AND inventory_item_id = %s
               AND deleted_at IS NULL
               AND EXISTS (
                 SELECT 1
@@ -2401,7 +2810,9 @@ def update_inventory_copy(request: Request, item_id: int, copy_id: int, payload:
             ],
         )
         _sync_inventory_progress_from_copies(conn, item_id, now)
-        row = conn.execute("SELECT * FROM inventory_copies WHERE id = ?", (copy_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM inventory_copies WHERE id = %s", (copy_id,)
+        ).fetchone()
         copy = _inventory_copy_dict(row)
         parent = {"id": item_id, "copies": [copy], "images": []}
         _attach_images(conn, [parent])
@@ -2413,14 +2824,16 @@ def delete_inventory_item(request: Request, item_id: int) -> Response:
     now = utc_now_sql()
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
-    owner_delete_clause, owner_delete_params = _inventory_owner_clause(owner_user_id, alias="")
+    owner_delete_clause, owner_delete_params = _inventory_owner_clause(
+        owner_user_id, alias=""
+    )
     with connect() as conn:
         image_rows = conn.execute(
             f"""
             SELECT img.inventory_item_id, img.file_name, img.storage_key
             FROM inventory_images img
             JOIN inventory_items i ON i.id = img.inventory_item_id
-            WHERE img.inventory_item_id = ?
+            WHERE img.inventory_item_id = %s
               AND img.deleted_at IS NULL
               AND {owner_clause}
             """,
@@ -2429,10 +2842,10 @@ def delete_inventory_item(request: Request, item_id: int) -> Response:
         cursor = conn.execute(
             f"""
             UPDATE inventory_items
-            SET deleted_at = ?,
-                updated_at = ?,
+            SET deleted_at = %s,
+                updated_at = %s,
                 version = COALESCE(version, 1) + 1
-            WHERE id = ? AND {owner_delete_clause}
+            WHERE id = %s AND {owner_delete_clause}
             """,
             [now, now, item_id, *owner_delete_params],
         )
@@ -2441,10 +2854,10 @@ def delete_inventory_item(request: Request, item_id: int) -> Response:
         conn.execute(
             """
             UPDATE inventory_copies
-            SET deleted_at = COALESCE(deleted_at, ?),
-                updated_at = ?,
+            SET deleted_at = COALESCE(deleted_at, %s),
+                updated_at = %s,
                 version = COALESCE(version, 1) + 1
-            WHERE inventory_item_id = ?
+            WHERE inventory_item_id = %s
               AND deleted_at IS NULL
             """,
             (now, now, item_id),
@@ -2452,16 +2865,18 @@ def delete_inventory_item(request: Request, item_id: int) -> Response:
         conn.execute(
             """
             UPDATE inventory_images
-            SET deleted_at = COALESCE(deleted_at, ?),
+            SET deleted_at = COALESCE(deleted_at, %s),
                 version = COALESCE(version, 1) + 1
-            WHERE inventory_item_id = ?
+            WHERE inventory_item_id = %s
               AND deleted_at IS NULL
             """,
             (now, item_id),
         )
 
     for row in image_rows:
-        _delete_image_file(int(row["inventory_item_id"]), row["file_name"], row.get("storage_key"))
+        _delete_image_file(
+            int(row["inventory_item_id"]), row["file_name"], row.get("storage_key")
+        )
     return Response(status_code=204)
 
 
@@ -2476,7 +2891,7 @@ async def _store_inventory_image(
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
     with connect() as conn:
         item = conn.execute(
-            f"SELECT id, public_id FROM inventory_items i WHERE i.id = ? AND {owner_clause}",
+            f"SELECT id, public_id FROM inventory_items i WHERE i.id = %s AND {owner_clause}",
             [item_id, *owner_params],
         ).fetchone()
         if item is None:
@@ -2487,8 +2902,8 @@ async def _store_inventory_image(
                 SELECT c.id
                 FROM inventory_copies c
                 JOIN inventory_items i ON i.id = c.inventory_item_id
-                WHERE c.id = ?
-                  AND c.inventory_item_id = ?
+                WHERE c.id = %s
+                  AND c.inventory_item_id = %s
                   AND c.deleted_at IS NULL
                   AND {owner_clause}
                 """,
@@ -2500,7 +2915,9 @@ async def _store_inventory_image(
     ext = _safe_image_ext(image)
     content = await image.read(MAX_IMAGE_BYTES + 1)
     if len(content) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Image is too large. Maximum size is 12 MB.")
+        raise HTTPException(
+            status_code=413, detail="Image is too large. Maximum size is 12 MB."
+        )
     if not content:
         raise HTTPException(status_code=400, detail="Image upload was empty.")
 
@@ -2517,7 +2934,7 @@ async def _store_inventory_image(
                 INSERT INTO inventory_images (
                     public_id, inventory_item_id, inventory_copy_id, file_name, storage_key, original_name, content_type,
                     image_role, caption, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -2533,7 +2950,10 @@ async def _store_inventory_image(
                     now,
                 ),
             )
-            row = conn.execute("SELECT * FROM inventory_images WHERE id = ?", (cursor.fetchone()["id"],)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM inventory_images WHERE id = %s",
+                (cursor.fetchone()["id"],),
+            ).fetchone()
             return _image_dict(row)
     except Exception:
         _delete_image_file(item_id, file_name, storage_key)
@@ -2548,7 +2968,9 @@ async def upload_inventory_image(
     image_role: str = Form(default="other"),
     caption: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    return await _store_inventory_image(_inventory_owner_id(request), item_id, image, image_role, caption)
+    return await _store_inventory_image(
+        _inventory_owner_id(request), item_id, image, image_role, caption
+    )
 
 
 @app.post("/api/inventory/{item_id}/copies/{copy_id}/images", status_code=201)
@@ -2560,7 +2982,9 @@ async def upload_inventory_copy_image(
     image_role: str = Form(default="other"),
     caption: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    return await _store_inventory_image(_inventory_owner_id(request), item_id, image, image_role, caption, copy_id)
+    return await _store_inventory_image(
+        _inventory_owner_id(request), item_id, image, image_role, caption, copy_id
+    )
 
 
 @app.delete("/api/images/{image_id}", status_code=204)
@@ -2574,7 +2998,7 @@ def delete_inventory_image(request: Request, image_id: int) -> Response:
             SELECT img.*
             FROM inventory_images img
             JOIN inventory_items i ON i.id = img.inventory_item_id
-            WHERE img.id = ?
+            WHERE img.id = %s
               AND img.deleted_at IS NULL
               AND {owner_clause}
             """,
@@ -2585,14 +3009,16 @@ def delete_inventory_image(request: Request, image_id: int) -> Response:
         conn.execute(
             """
             UPDATE inventory_images
-            SET deleted_at = ?,
+            SET deleted_at = %s,
                 version = COALESCE(version, 1) + 1
-            WHERE id = ?
+            WHERE id = %s
             """,
             (now, image_id),
         )
 
-    _delete_image_file(int(row["inventory_item_id"]), row["file_name"], row.get("storage_key"))
+    _delete_image_file(
+        int(row["inventory_item_id"]), row["file_name"], row.get("storage_key")
+    )
     return Response(status_code=204)
 
 
@@ -2663,32 +3089,36 @@ def _find_import_unit_id(
         """
         SELECT id
         FROM bsd_units
-        WHERE game_system = ?
+        WHERE game_system = %s
           AND active = 1
           AND deleted_at IS NULL
-          AND lower(name) = lower(?)
+          AND lower(name) = lower(%s)
         """
     ]
     params: list[Any] = [game_system, unit_name]
     if catalogue_file:
-        sql.append("AND lower(catalogue_file) = lower(?)")
+        sql.append("AND lower(catalogue_file) = lower(%s)")
         params.append(catalogue_file)
     if faction:
-        sql.append("AND lower(faction) = lower(?)")
+        sql.append("AND lower(faction) = lower(%s)")
         params.append(faction)
     sql.append("ORDER BY id DESC LIMIT 1")
     row = conn.execute(" ".join(sql), params).fetchone()
     return int(row["id"]) if row is not None else None
 
 
-def _csv_inventory_data(row: dict[str, Any], config: GameSystemConfig, conn: Any) -> dict[str, Any]:
+def _csv_inventory_data(
+    row: dict[str, Any], config: GameSystemConfig, conn: Any
+) -> dict[str, Any]:
     row_game_system = _csv_text(row, "game_system") or config.id
     try:
         row_config = get_game_system_config(row_game_system)
     except UnknownGameSystem as exc:
         raise ValueError(f"Unknown game_system '{row_game_system}'.") from exc
     if row_config.id != config.id:
-        raise ValueError(f"CSV row is for {row_config.label}; import it from that game tab.")
+        raise ValueError(
+            f"CSV row is for {row_config.label}; import it from that game tab."
+        )
 
     unit_name = _csv_text(row, "unit_name")
     if not unit_name:
@@ -2704,7 +3134,9 @@ def _csv_inventory_data(row: dict[str, Any], config: GameSystemConfig, conn: Any
         faction=faction,
         catalogue_file=catalogue_file,
     )
-    wargear_selections_json = json.dumps(wargear_selections, sort_keys=True) if wargear_selections else None
+    wargear_selections_json = (
+        json.dumps(wargear_selections, sort_keys=True) if wargear_selections else None
+    )
 
     return {
         "public_id": _csv_public_id(row) or _new_public_id(),
@@ -2735,10 +3167,12 @@ def _import_inventory_csv_row(
     data = _csv_inventory_data(row, config, conn)
     now = utc_now_sql()
     existing = conn.execute(
-        "SELECT id, owner_user_id FROM inventory_items WHERE public_id = ?",
+        "SELECT id, owner_user_id FROM inventory_items WHERE public_id = %s",
         (data["public_id"],),
     ).fetchone()
-    if existing is not None and not _owner_matches(existing["owner_user_id"], owner_user_id):
+    if existing is not None and not _owner_matches(
+        existing["owner_user_id"], owner_user_id
+    ):
         data["public_id"] = _new_public_id()
         existing = None
 
@@ -2749,7 +3183,7 @@ def _import_inventory_csv_row(
                 public_id, owner_user_id, game_system, unit_id, unit_name, faction, catalogue_file,
                 quantity, models_owned, built_count, painted_count, wargear, wargear_selections_json,
                 model_number, storage_location, notes, acquired_on, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -2781,25 +3215,25 @@ def _import_inventory_csv_row(
         conn.execute(
             """
             UPDATE inventory_items
-            SET game_system = ?,
-                unit_id = ?,
-                unit_name = ?,
-                faction = ?,
-                catalogue_file = ?,
-                quantity = ?,
-                models_owned = ?,
-                built_count = ?,
-                painted_count = ?,
-                wargear = ?,
-                wargear_selections_json = ?,
-                model_number = ?,
-                storage_location = ?,
-                notes = ?,
-                acquired_on = ?,
-                updated_at = ?,
+            SET game_system = %s,
+                unit_id = %s,
+                unit_name = %s,
+                faction = %s,
+                catalogue_file = %s,
+                quantity = %s,
+                models_owned = %s,
+                built_count = %s,
+                painted_count = %s,
+                wargear = %s,
+                wargear_selections_json = %s,
+                model_number = %s,
+                storage_location = %s,
+                notes = %s,
+                acquired_on = %s,
+                updated_at = %s,
                 deleted_at = NULL,
                 version = COALESCE(version, 1) + 1
-            WHERE id = ?
+            WHERE id = %s
             """,
             (
                 data["game_system"],
@@ -2825,16 +3259,18 @@ def _import_inventory_csv_row(
             """
             UPDATE inventory_copies
             SET deleted_at = NULL,
-                updated_at = ?,
+                updated_at = %s,
                 version = COALESCE(version, 1) + 1
-            WHERE inventory_item_id = ?
-              AND copy_number <= ?
+            WHERE inventory_item_id = %s
+              AND copy_number <= %s
             """,
             (now, item_id, data["quantity"]),
         )
         action = "updated"
 
-    item = conn.execute("SELECT * FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+    item = conn.execute(
+        "SELECT * FROM inventory_items WHERE id = %s", (item_id,)
+    ).fetchone()
     _ensure_inventory_copies(conn, item)
     _apply_imported_item_to_copies(
         conn,
@@ -2860,20 +3296,27 @@ async def import_inventory_csv(
     owner_user_id = _inventory_owner_id(request)
     content = await file.read(MAX_CSV_IMPORT_BYTES + 1)
     if len(content) > MAX_CSV_IMPORT_BYTES:
-        raise HTTPException(status_code=413, detail="CSV is too large. Maximum size is 2 MB.")
+        raise HTTPException(
+            status_code=413, detail="CSV is too large. Maximum size is 2 MB."
+        )
     if not content:
         raise HTTPException(status_code=400, detail="CSV upload was empty.")
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded.") from exc
+        raise HTTPException(
+            status_code=400, detail="CSV must be UTF-8 encoded."
+        ) from exc
 
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         raise HTTPException(status_code=400, detail="CSV has no header row.")
     missing = {"unit_name"} - {field.strip() for field in reader.fieldnames if field}
     if missing:
-        raise HTTPException(status_code=400, detail="CSV does not look like a Warhammer Stock Tracker export.")
+        raise HTTPException(
+            status_code=400,
+            detail="CSV does not look like a Warhammer Stock Tracker export.",
+        )
 
     created = 0
     updated = 0
@@ -2886,7 +3329,9 @@ async def import_inventory_csv(
             try:
                 action = _import_inventory_csv_row(conn, row, config, owner_user_id)
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"Row {row_number}: {exc}") from exc
+                raise HTTPException(
+                    status_code=400, detail=f"Row {row_number}: {exc}"
+                ) from exc
             if action == "created":
                 created += 1
             else:
@@ -2902,7 +3347,9 @@ async def import_inventory_csv(
 
 
 @app.get("/api/export.csv")
-def export_inventory_csv(request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)) -> Response:
+def export_inventory_csv(
+    request: Request, game_system: str = Query(default=DEFAULT_GAME_SYSTEM)
+) -> Response:
     config = _config_or_400(game_system)
     owner_user_id = _inventory_owner_id(request)
     owner_clause, owner_params = _inventory_owner_clause(owner_user_id)
@@ -2951,7 +3398,7 @@ def export_inventory_csv(request: Request, game_system: str = Query(default=DEFA
             FROM inventory_items i
             LEFT JOIN bsd_units u ON u.id = i.unit_id
             LEFT JOIN copy_progress cp ON cp.inventory_item_id = i.id
-            WHERE i.game_system = ? AND {owner_clause}
+            WHERE i.game_system = %s AND {owner_clause}
             ORDER BY lower(i.unit_name)
             """,
             [config.id, *owner_params],

@@ -54,24 +54,25 @@ def test_init_db_backfills_copy_progress(isolated_db):
             INSERT INTO inventory_items (
                 unit_name, quantity, models_owned, built_count, painted_count,
                 created_at, updated_at
-            ) VALUES ('Backfill Squad', 2, 10, 7, 5, ?, ?)
+            ) VALUES ('Backfill Squad', 2, 10, 7, 5, %s, %s)
             RETURNING id
             """,
             (now, now),
         )
         item_id = cursor.fetchone()["id"]
-        conn.executemany(
-            """
-            INSERT INTO inventory_copies (
-                inventory_item_id, copy_number, models_owned, built_count, painted_count,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, 0, 0, ?, ?)
-            """,
-            [
-                (item_id, 1, 5, now, now),
-                (item_id, 2, 5, now, now),
-            ],
-        )
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO inventory_copies (
+                    inventory_item_id, copy_number, models_owned, built_count, painted_count,
+                    created_at, updated_at
+                ) VALUES (%s, %s, %s, 0, 0, %s, %s)
+                """,
+                [
+                    (item_id, 1, 5, now, now),
+                    (item_id, 2, 5, now, now),
+                ],
+            )
 
     db.init_db()
 
@@ -80,13 +81,13 @@ def test_init_db_backfills_copy_progress(isolated_db):
             """
             SELECT copy_number, public_id, built_count, painted_count
             FROM inventory_copies
-            WHERE inventory_item_id = ?
+            WHERE inventory_item_id = %s
             ORDER BY copy_number
             """,
             (item_id,),
         ).fetchall()
         item = conn.execute(
-            "SELECT public_id, version, deleted_at FROM inventory_items WHERE id = ?",
+            "SELECT public_id, version, deleted_at FROM inventory_items WHERE id = %s",
             (item_id,),
         ).fetchone()
         assert db.table_count(conn, "inventory_items") == 1
@@ -95,4 +96,7 @@ def test_init_db_backfills_copy_progress(isolated_db):
     assert item["version"] == 1
     assert item["deleted_at"] is None
     assert all(row["public_id"] for row in copies)
-    assert [(row["built_count"], row["painted_count"]) for row in copies] == [(5, 5), (2, 0)]
+    assert [(row["built_count"], row["painted_count"]) for row in copies] == [
+        (5, 5),
+        (2, 0),
+    ]

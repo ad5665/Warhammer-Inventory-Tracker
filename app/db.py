@@ -14,7 +14,9 @@ from psycopg.rows import dict_row
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("WH40K_DATA_DIR", BASE_DIR / "data"))
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://wh40k:wh40k@127.0.0.1:5432/wh40k")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://wh40k:wh40k@127.0.0.1:5432/wh40k"
+)
 DB_SCHEMA = os.getenv("WH40K_DB_SCHEMA", "public").strip() or "public"
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -45,54 +47,19 @@ def _validate_identifier(identifier: str) -> str:
     return identifier
 
 
-def _translate_sql(statement: str) -> str:
-    translated = statement.replace("?", "%s")
-    translated = re.sub(r"\s+COLLATE\s+NOCASE\b", "", translated, flags=re.IGNORECASE)
-    translated = re.sub(r"\bLIKE\b", "ILIKE", translated, flags=re.IGNORECASE)
-    return translated
-
-
-def _split_script(script: str) -> list[str]:
-    return [statement.strip() for statement in script.split(";") if statement.strip()]
-
-
-class AppConnection:
-    def __init__(self, conn: psycopg.Connection):
-        self._conn = conn
-
-    def execute(self, statement: str, params: Any | None = None):
-        return self._conn.execute(_translate_sql(statement), params)
-
-    def executemany(self, statement: str, params_seq: Any):
-        cursor = self._conn.cursor()
-        cursor.executemany(_translate_sql(statement), params_seq)
-        return cursor
-
-    def executescript(self, script: str) -> None:
-        for statement in _split_script(script):
-            self.execute(statement)
-
-    def commit(self) -> None:
-        self._conn.commit()
-
-    def rollback(self) -> None:
-        self._conn.rollback()
-
-    def close(self) -> None:
-        self._conn.close()
-
-
-def get_connection() -> AppConnection:
+def get_connection() -> psycopg.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     raw = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     schema = _validate_identifier(DB_SCHEMA)
-    raw.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+    raw.execute(
+        sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+    )
     raw.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema)))
-    return AppConnection(raw)
+    return raw
 
 
 @contextmanager
-def connect() -> Iterator[AppConnection]:
+def connect() -> Iterator[psycopg.Connection]:
     conn = get_connection()
     try:
         yield conn
@@ -107,24 +74,28 @@ def connect() -> Iterator[AppConnection]:
 def drop_schema(schema: str) -> None:
     schema = _validate_identifier(schema)
     with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
-        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+        conn.execute(
+            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+        )
 
 
-def _column_names(conn: AppConnection, table_name: str) -> set[str]:
+def _column_names(conn: psycopg.Connection, table_name: str) -> set[str]:
     _validate_identifier(table_name)
     rows = conn.execute(
         """
         SELECT column_name AS name
         FROM information_schema.columns
         WHERE table_schema = current_schema()
-          AND table_name = ?
+          AND table_name = %s
         """,
         (table_name,),
     ).fetchall()
     return {row["name"] for row in rows}
 
 
-def _ensure_column(conn: AppConnection, table_name: str, column_name: str, ddl: str) -> None:
+def _ensure_column(
+    conn: psycopg.Connection, table_name: str, column_name: str, ddl: str
+) -> None:
     _validate_identifier(table_name)
     _validate_identifier(column_name)
     if column_name not in _column_names(conn, table_name):
@@ -153,7 +124,7 @@ def _distributed_counts(total: int, copies: list[Any]) -> list[int]:
     return values
 
 
-def _backfill_copy_progress(conn: AppConnection) -> None:
+def _backfill_copy_progress(conn: psycopg.Connection) -> None:
     items = conn.execute(
         """
         SELECT id, built_count, painted_count
@@ -167,7 +138,7 @@ def _backfill_copy_progress(conn: AppConnection) -> None:
             """
             SELECT id, models_owned, built_count, painted_count
             FROM inventory_copies
-            WHERE inventory_item_id = ?
+            WHERE inventory_item_id = %s
             ORDER BY copy_number
             """,
             (item["id"],),
@@ -177,10 +148,18 @@ def _backfill_copy_progress(conn: AppConnection) -> None:
 
         built_values: list[int] | None = None
         painted_values: list[int] | None = None
-        if _safe_count(item["built_count"]) > 0 and sum(_safe_count(copy["built_count"]) for copy in copies) == 0:
+        if (
+            _safe_count(item["built_count"]) > 0
+            and sum(_safe_count(copy["built_count"]) for copy in copies) == 0
+        ):
             built_values = _distributed_counts(_safe_count(item["built_count"]), copies)
-        if _safe_count(item["painted_count"]) > 0 and sum(_safe_count(copy["painted_count"]) for copy in copies) == 0:
-            painted_values = _distributed_counts(_safe_count(item["painted_count"]), copies)
+        if (
+            _safe_count(item["painted_count"]) > 0
+            and sum(_safe_count(copy["painted_count"]) for copy in copies) == 0
+        ):
+            painted_values = _distributed_counts(
+                _safe_count(item["painted_count"]), copies
+            )
 
         if built_values is None and painted_values is None:
             continue
@@ -189,9 +168,9 @@ def _backfill_copy_progress(conn: AppConnection) -> None:
             conn.execute(
                 """
                 UPDATE inventory_copies
-                SET built_count = COALESCE(?, built_count),
-                    painted_count = COALESCE(?, painted_count)
-                WHERE id = ?
+                SET built_count = COALESCE(%s, built_count),
+                    painted_count = COALESCE(%s, painted_count)
+                WHERE id = %s
                 """,
                 (
                     built_values[index] if built_values is not None else None,
@@ -205,8 +184,13 @@ def _new_public_id() -> str:
     return str(uuid.uuid4())
 
 
-def _backfill_public_ids(conn: AppConnection) -> None:
-    for table_name in ("bsd_units", "inventory_items", "inventory_copies", "inventory_images"):
+def _backfill_public_ids(conn: psycopg.Connection) -> None:
+    for table_name in (
+        "bsd_units",
+        "inventory_items",
+        "inventory_copies",
+        "inventory_images",
+    ):
         if "public_id" not in _column_names(conn, table_name):
             continue
         rows = conn.execute(
@@ -214,14 +198,14 @@ def _backfill_public_ids(conn: AppConnection) -> None:
         ).fetchall()
         for row in rows:
             conn.execute(
-                f"UPDATE {table_name} SET public_id = ? WHERE id = ?",
+                f"UPDATE {table_name} SET public_id = %s WHERE id = %s",
                 (_new_public_id(), row["id"]),
             )
 
 
 def init_db() -> None:
     with connect() as conn:
-        conn.executescript(
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bsd_units (
                 id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -351,38 +335,99 @@ def init_db() -> None:
         )
 
         _ensure_column(conn, "bsd_units", "public_id", "public_id TEXT")
-        _ensure_column(conn, "bsd_units", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
+        _ensure_column(
+            conn,
+            "bsd_units",
+            "game_system",
+            "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'",
+        )
         _ensure_column(conn, "bsd_units", "min_models", "min_models INTEGER")
         _ensure_column(conn, "bsd_units", "max_models", "max_models INTEGER")
-        _ensure_column(conn, "bsd_units", "version", "version INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(
+            conn, "bsd_units", "version", "version INTEGER NOT NULL DEFAULT 1"
+        )
         _ensure_column(conn, "bsd_units", "deleted_at", "deleted_at TEXT")
         _ensure_column(conn, "inventory_items", "public_id", "public_id TEXT")
-        _ensure_column(conn, "inventory_items", "owner_user_id", "owner_user_id INTEGER")
-        _ensure_column(conn, "inventory_items", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
-        _ensure_column(conn, "bsd_units", "wargear_options_json", "wargear_options_json TEXT")
-        _ensure_column(conn, "bsd_units", "model_composition_json", "model_composition_json TEXT")
+        _ensure_column(
+            conn, "inventory_items", "owner_user_id", "owner_user_id INTEGER"
+        )
+        _ensure_column(
+            conn,
+            "inventory_items",
+            "game_system",
+            "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'",
+        )
+        _ensure_column(
+            conn, "bsd_units", "wargear_options_json", "wargear_options_json TEXT"
+        )
+        _ensure_column(
+            conn, "bsd_units", "model_composition_json", "model_composition_json TEXT"
+        )
         _ensure_column(conn, "inventory_items", "wargear", "wargear TEXT")
-        _ensure_column(conn, "inventory_items", "wargear_selections_json", "wargear_selections_json TEXT")
+        _ensure_column(
+            conn,
+            "inventory_items",
+            "wargear_selections_json",
+            "wargear_selections_json TEXT",
+        )
         _ensure_column(conn, "inventory_items", "model_number", "model_number TEXT")
-        _ensure_column(conn, "inventory_items", "version", "version INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(
+            conn, "inventory_items", "version", "version INTEGER NOT NULL DEFAULT 1"
+        )
         _ensure_column(conn, "inventory_items", "deleted_at", "deleted_at TEXT")
         _ensure_column(conn, "inventory_copies", "public_id", "public_id TEXT")
-        _ensure_column(conn, "inventory_copies", "models_owned", "models_owned INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "inventory_copies", "built_count", "built_count INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "inventory_copies", "painted_count", "painted_count INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "inventory_copies", "version", "version INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(
+            conn,
+            "inventory_copies",
+            "models_owned",
+            "models_owned INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            conn,
+            "inventory_copies",
+            "built_count",
+            "built_count INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            conn,
+            "inventory_copies",
+            "painted_count",
+            "painted_count INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            conn, "inventory_copies", "version", "version INTEGER NOT NULL DEFAULT 1"
+        )
         _ensure_column(conn, "inventory_copies", "deleted_at", "deleted_at TEXT")
         _ensure_column(conn, "inventory_images", "public_id", "public_id TEXT")
-        _ensure_column(conn, "inventory_images", "inventory_copy_id", "inventory_copy_id INTEGER")
+        _ensure_column(
+            conn, "inventory_images", "inventory_copy_id", "inventory_copy_id INTEGER"
+        )
         _ensure_column(conn, "inventory_images", "storage_key", "storage_key TEXT")
-        _ensure_column(conn, "inventory_images", "version", "version INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(
+            conn, "inventory_images", "version", "version INTEGER NOT NULL DEFAULT 1"
+        )
         _ensure_column(conn, "inventory_images", "deleted_at", "deleted_at TEXT")
-        _ensure_column(conn, "import_runs", "game_system", "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'")
-        _ensure_column(conn, "auth_users", "auth_provider", "auth_provider TEXT NOT NULL DEFAULT 'local'")
+        _ensure_column(
+            conn,
+            "import_runs",
+            "game_system",
+            "game_system TEXT NOT NULL DEFAULT 'wh40k_10e'",
+        )
+        _ensure_column(
+            conn,
+            "auth_users",
+            "auth_provider",
+            "auth_provider TEXT NOT NULL DEFAULT 'local'",
+        )
         _ensure_column(conn, "auth_users", "auth_subject", "auth_subject TEXT")
         _ensure_column(conn, "auth_users", "email", "email TEXT")
         _ensure_column(conn, "auth_users", "display_name", "display_name TEXT")
-        _ensure_column(conn, "auth_users", "preferred_theme", "preferred_theme TEXT NOT NULL DEFAULT 'default'")
+        _ensure_column(
+            conn,
+            "auth_users",
+            "preferred_theme",
+            "preferred_theme TEXT NOT NULL DEFAULT 'default'",
+        )
 
         _backfill_public_ids(conn)
 
@@ -399,7 +444,7 @@ def init_db() -> None:
         )
         _backfill_copy_progress(conn)
 
-        conn.executescript(
+        conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_bsd_units_game_name
                 ON bsd_units(game_system, lower(name));
@@ -463,7 +508,7 @@ def init_db() -> None:
         )
 
 
-def table_count(conn: AppConnection, table_name: str) -> int:
+def table_count(conn: psycopg.Connection, table_name: str) -> int:
     _validate_identifier(table_name)
     row = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
     return int(row["count"] if row else 0)

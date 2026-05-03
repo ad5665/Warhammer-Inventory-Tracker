@@ -267,9 +267,6 @@ function updateGameCopy() {
     wh40k_10e: "Track Warhammer 40,000 units and models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.",
   };
   el("game-subtitle").textContent = subtitles[state.currentGame] || `Track ${system.label} models, including built count, painted count, imported weapon loadouts, model numbers, storage location, and photos.`;
-  el("sync-btn").textContent = "Sync BSData";
-  el("sync-btn").title = `Sync ${system.label} BSData`;
-  el("sync-btn").setAttribute("aria-label", `Sync ${system.label} BSData`);
   const placeholders = {
     kill_team: "Legionary, Kommandos, Angels of Death, Plague Marine...",
     age_of_sigmar_4e: "Liberators, Clanrats, Blood Warriors, Treelord...",
@@ -1421,24 +1418,6 @@ async function deleteImage(imageId) {
   }
 }
 
-async function syncBsdata() {
-  const btn = el("sync-btn");
-  const system = activeSystem();
-  btn.disabled = true;
-  btn.textContent = "Syncing...";
-  try {
-    const result = await api(`/api/sync/${state.currentGame}`, { method: "POST", body: "{}" });
-    const errorSuffix = result.errors?.length ? ` (${result.errors.length} catalogue errors)` : "";
-    toast(`Imported ${result.units_imported} ${system.catalogue_word || "entries"} from ${result.files_scanned} files${errorSuffix}.`);
-    await Promise.all([loadStatus(), loadFactions(), searchUnits()]);
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    btn.disabled = false;
-    updateGameCopy();
-  }
-}
-
 function customFormPayload(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   data.game_system = state.currentGame;
@@ -1458,7 +1437,7 @@ async function refreshGameData() {
   renderTabs();
   updateGameCopy();
   loadCollapsedInventoryItems();
-  el("unit-results").innerHTML = '<div class="empty">Search after syncing this game system.</div>';
+  el("unit-results").innerHTML = '<div class="empty">Search imported catalogue entries.</div>';
   await Promise.all([loadStatus(), loadFactions(), loadInventory()]);
   await searchUnits();
 }
@@ -1518,7 +1497,6 @@ function wireEvents() {
       if (event.target === dialog) closeDialog(dialog);
     });
   });
-  el("sync-btn").addEventListener("click", syncBsdata);
   el("faction-filter").addEventListener("change", searchUnits);
   el("inventory-body").addEventListener("click", (event) => {
     const button = event.target.closest("[data-collapse-toggle]");

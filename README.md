@@ -57,7 +57,7 @@ Keycloak is available at `http://localhost:8081`. The development admin login is
 
 MinIO is available at `http://127.0.0.1:9001` with username `wh40k` and password `wh40k-secret`.
 
-Then choose the **40k**, **Kill Team**, or **AoS** tab and click **Sync BSData** under **Last import**.
+BSData sync runs automatically when the app starts and then every night at local midnight. Admins can also trigger it manually from `/admin`. Set `WH40K_BSDATA_AUTO_SYNC_ENABLED=false` to disable the automatic scheduler.
 
 ## Python development
 
@@ -213,11 +213,11 @@ Main endpoints:
 
 - `GET /` - web front end
 - `GET /login` - login page when auth is enabled
-- `GET /admin` - admin portal for setting the admin password and creating users
+- `GET /admin` - admin portal for setting the admin password, creating users, and manually syncing BSData
 - `GET /api/game-systems` - available game systems
-- `POST /api/sync/wh40k_10e` - clone/pull 40k BSData and import `.cat` files
-- `POST /api/sync/kill_team` - clone/pull Kill Team BSData and import `.cat` files
-- `POST /api/sync/age_of_sigmar_4e` - clone/pull Age of Sigmar BSData and import `.cat` files
+- `POST /api/sync/wh40k_10e` - clone/pull 40k BSData and import `.cat` files; admin-only when auth is enabled
+- `POST /api/sync/kill_team` - clone/pull Kill Team BSData and import `.cat` files; admin-only when auth is enabled
+- `POST /api/sync/age_of_sigmar_4e` - clone/pull Age of Sigmar BSData and import `.cat` files; admin-only when auth is enabled
 - `GET /api/status?game_system=wh40k_10e` - database and import status
 - `GET /api/factions?game_system=kill_team` - imported factions/teams
 - `GET /api/factions?game_system=age_of_sigmar_4e` - imported factions/armies
