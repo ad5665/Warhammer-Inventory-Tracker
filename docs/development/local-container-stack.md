@@ -5,7 +5,8 @@ Use this stack while migrating toward the hosted web/mobile architecture. It run
 ## Start
 
 ```bash
-docker compose -f docker-compose.dev.yml up --build
+docker compose -f docker-compose.dev.yml pull web
+docker compose -f docker-compose.dev.yml up
 ```
 
 Open the app:
@@ -91,7 +92,7 @@ Override with:
 
 ```bash
 WH40K_CORS_ORIGINS=http://localhost:5173,http://192.168.1.50:8081 \
-docker compose -f docker-compose.dev.yml up --build
+docker compose -f docker-compose.dev.yml up
 ```
 
 For a physical mobile device, point Expo at the machine's LAN address, for example:
@@ -110,4 +111,4 @@ This deletes the dev BSData working volume, the Postgres volume, the Keycloak sc
 
 ## Production Compose
 
-`docker-compose.yml` runs the same service shape with the normal local volume names. Use `docker-compose.dev.yml` when you want the explicitly development-named volumes and web/mobile CORS defaults.
+`docker-compose.yml` runs the same service shape with the normal local volume names and local app build. Use `docker-compose.dev.yml` when you want the published dev app image, explicitly development-named volumes, and web/mobile CORS defaults. Set `WH40K_DEV_IMAGE` to test a different published image tag.

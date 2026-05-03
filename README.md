@@ -118,10 +118,11 @@ WH40K_PORT=9000 docker compose up --build
 
 ## Local cloud-style development stack
 
-For the web/mobile sync migration, use the dev Compose stack. It builds the app locally and starts Postgres plus MinIO as local stand-ins for hosted database and S3 storage:
+For the web/mobile sync migration, use the dev Compose stack. It pulls the published dev app image and starts Postgres plus MinIO as local stand-ins for hosted database and S3 storage:
 
 ```bash
-docker compose -f docker-compose.dev.yml up --build
+docker compose -f docker-compose.dev.yml pull web
+docker compose -f docker-compose.dev.yml up
 ```
 
 This stack uses Postgres and MinIO through the same backend adapters as the app. See [docs/development/local-container-stack.md](docs/development/local-container-stack.md).

@@ -1,8 +1,6 @@
 services:
   web:
-    build:
-      context: .
-    image: wh40k-stock-tracker:dev
+    image: ${WH40K_DEV_IMAGE:-ad5665/warhammer-inventory-tracker:dev}
     depends_on:
       postgres:
         condition: service_healthy
