@@ -1,4 +1,5 @@
 const DEFAULT_GAME = "wh40k_10e";
+const DEFAULT_THEME = "default";
 
 const state = {
   inventory: [],
@@ -8,6 +9,31 @@ const state = {
   unitResults: [],
   collapsedInventoryItems: new Set(),
 };
+
+const themes = [
+  { id: "default", label: "Default" },
+  { id: "ultramarines", label: "Ultramarines" },
+  { id: "blood-angels", label: "Blood Angels" },
+  { id: "dark-angels", label: "Dark Angels" },
+  { id: "space-wolves", label: "Space Wolves" },
+  { id: "imperial-fists", label: "Imperial Fists" },
+  { id: "white-scars", label: "White Scars" },
+  { id: "raven-guard", label: "Raven Guard" },
+  { id: "salamanders", label: "Salamanders" },
+  { id: "iron-hands", label: "Iron Hands" },
+  { id: "crimson-fists", label: "Crimson Fists" },
+  { id: "black-templars", label: "Black Templars" },
+  { id: "night-lords", label: "Night Lords" },
+  { id: "world-eaters", label: "World Eaters" },
+  { id: "death-guard", label: "Death Guard" },
+  { id: "thousand-sons", label: "Thousand Sons" },
+  { id: "emperors-children", label: "Emperor's Children" },
+  { id: "iron-warriors", label: "Iron Warriors" },
+  { id: "word-bearers", label: "Word Bearers" },
+  { id: "alpha-legion", label: "Alpha Legion" },
+  { id: "black-legion", label: "Black Legion" },
+  { id: "sons-of-horus", label: "Sons of Horus" },
+];
 
 const autosaveTimers = new Map();
 const copyAutosaveTimers = new Map();
@@ -19,6 +45,19 @@ const fallbackSystems = [
 ];
 
 const el = (id) => document.getElementById(id);
+
+function savedTheme() {
+  const theme = localStorage.getItem("warhammer-stock-theme") || DEFAULT_THEME;
+  return themes.some(candidate => candidate.id === theme) ? theme : DEFAULT_THEME;
+}
+
+function applyTheme(themeId) {
+  const theme = themes.some(candidate => candidate.id === themeId) ? themeId : DEFAULT_THEME;
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("warhammer-stock-theme", theme);
+}
+
+applyTheme(savedTheme());
 
 function esc(value) {
   return String(value ?? "")
@@ -157,6 +196,15 @@ function renderTabs() {
       ${esc(system.short_label || system.label)}
     </button>
   `).join("");
+}
+
+function renderThemeOptions() {
+  const select = el("theme-select");
+  if (!select) return;
+  select.innerHTML = themes.map(theme => `
+    <option value="${esc(theme.id)}">${esc(theme.label)}</option>
+  `).join("");
+  select.value = savedTheme();
 }
 
 function updateGameCopy() {
@@ -1354,6 +1402,10 @@ async function setGameSystem(gameSystem) {
 }
 
 function wireEvents() {
+  renderThemeOptions();
+  el("theme-select")?.addEventListener("change", (event) => {
+    applyTheme(event.target.value);
+  });
   el("sync-btn").addEventListener("click", syncBsdata);
   el("faction-filter").addEventListener("change", searchUnits);
   el("inventory-body").addEventListener("click", (event) => {
